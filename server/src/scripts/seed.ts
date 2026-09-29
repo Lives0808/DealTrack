@@ -804,19 +804,31 @@ Aventura Brasil`,
  * evaluating it. Everything here goes through the real code paths, so the
  * resulting PI, milestones and outcomes are exactly what production produces.
  */
-export async function seedDealClosure(): Promise<{
+export async function seedDealClosure(options: {
+  /**
+   * Runs the task queue on the caller's terms.
+   *
+   * In production the worker pool is live and notices new work within a second.
+   * Under test there is no pool, so the caller drains the queue itself — passing
+   * a `pump` keeps this function honest in both worlds instead of assuming one.
+   */
+  pump?: () => Promise<unknown>;
+} = {}): Promise<{
   won: string | null;
+  depositPaid: boolean;
   lost: string | null;
   expired: string | null;
 }> {
   const { recordOutcome, updateQuote } = await import('../core/repos/quoting.js');
-  const { getPiByQuote, markMilestonePaid, dueMilestones } = await import('../core/repos/billing.js');
+  const { getPiByQuote, listMilestones, markMilestonePaid, refreshOverdueMilestones } = await import(
+    '../core/repos/billing.js'
+  );
   const { getQueue } = await import('../core/queue.js');
 
   const quotes = getDb()
     .all<Row>('SELECT * FROM quotes ORDER BY created_at ASC')
     .map((row) => ({ id: String(row.id), quoteNo: String(row.quote_no) }));
-  if (quotes.length === 0) return { won: null, lost: null, expired: null };
+  if (quotes.length === 0) return { won: null, depositPaid: false, lost: null, expired: null };
 
   // ---- One win, with the deposit already received --------------------------
   const winner = quotes[quotes.length - 1]!;
@@ -827,23 +839,38 @@ export async function seedDealClosure(): Promise<{
     decidedBy: 'user:ops',
   });
 
-  // Let the orchestrator issue the PI and lay down the payment schedule.
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    const queued = getDb().count("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('queued','running')");
-    if (queued === 0 && getPiByQuote(winner.id)) break;
-    await new Promise((resolve) => setTimeout(resolve, 400));
+  // Get the proforma invoice issued and the payment schedule laid down.
+  if (options.pump) {
+    // The caller owns the queue; `recordOutcome` already enqueued the work.
+    for (let attempt = 0; attempt < 6 && !getPiByQuote(winner.id); attempt += 1) {
+      await options.pump();
+    }
+  } else {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const queued = getDb().count("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('queued','running')");
+      if (queued === 0 && getPiByQuote(winner.id)) break;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
   }
 
   const pi = getPiByQuote(winner.id);
+  let depositPaid = false;
   if (pi) {
-    const deposit = dueMilestones().find((entry) => entry.piId === pi.id && entry.label === 'deposit');
+    // Look the deposit up by its own id, not via `dueMilestones()`.
+    //
+    // The deposit is due three days from now, so a due-date query never finds it
+    // — which is how this seed used to print "定金已收" while leaving the
+    // milestone sitting at `pending`. A demo that claims a state it did not
+    // create is worse than a demo with no state at all.
+    const deposit = listMilestones({ piId: pi.id }).find((entry) => entry.label === 'deposit');
     if (deposit) {
-      markMilestonePaid({
+      const paid = markMilestonePaid({
         id: deposit.id,
         method: 'T/T',
         note: '演示数据：定金已到账（水单号 DEMO-0001）',
       });
+      depositPaid = paid?.status === 'paid';
     }
     // Push the balance payment past due so the collection board has something to
     // chase — an empty overdue column teaches the user nothing.
@@ -854,6 +881,10 @@ export async function seedDealClosure(): Promise<{
         new Date(Date.now() - 9 * 86_400_000).toISOString(),
         balance.id,
       );
+      // Reconcile immediately rather than waiting for the next sweep: the seed
+      // must leave the database in the state it says it left it in, whether or
+      // not a worker pool happens to be running.
+      refreshOverdueMilestones();
     }
   }
 
@@ -879,7 +910,7 @@ export async function seedDealClosure(): Promise<{
     });
   }
 
-  return { won: winner.quoteNo, lost: loser?.quoteNo ?? null, expired: lapsed?.quoteNo ?? null };
+  return { won: winner.quoteNo, depositPaid, lost: loser?.quoteNo ?? null, expired: lapsed?.quoteNo ?? null };
 }
 
 /** Inject the sample inquiries and run them through the real pipeline. */

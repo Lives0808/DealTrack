@@ -18,7 +18,7 @@ import { rmSync } from 'node:fs';
 import path from 'node:path';
 import { config } from '../core/config.js';
 import { createDb, getDb, setDb } from '../core/db.js';
-import { seedDatabase, SAMPLE_INQUIRIES, summarize } from './seed.js';
+import { seedDatabase, seedDealClosure, SAMPLE_INQUIRIES, summarize } from './seed.js';
 import { addDays } from '../core/util.js';
 import { SETTING_KEYS, getAutomation, setSetting } from '../core/settings.js';
 import { ingestInbound } from '../core/ingest.js';
@@ -497,6 +497,24 @@ async function main(): Promise<void> {
   } else {
     check('过期报价状态推进为 expired', false, '没有可测试的报价');
   }
+
+  console.log('\n【20】演示数据必须自洽（干净安装后打开就有东西看）');
+  // The seed's deal-closure scene is what a first-run user actually sees. It used
+  // to print "定金已收" while leaving the milestone `pending`, because it looked
+  // the deposit up via a due-date query and the deposit is not due yet.
+  const closure = await seedDealClosure({ pump: drainQueue });
+  check('演示数据推进了成交', Boolean(closure.won), closure.won ?? '未推进');
+  check('定金状态真实落地（不是只打印一句话）', closure.depositPaid, closure.depositPaid ? 'paid' : '仍是 pending');
+  const closurePi = closure.won ? getPiByQuote(closure.won === null ? '' : listQuotes({ limit: 50 }).find((q) => q.quoteNo === closure.won)?.id ?? '') : null;
+  const closureMilestones = closurePi?.milestones ?? [];
+  check(
+    '定金已收 + 尾款逾期都体现在数据里',
+    closureMilestones.some((m) => m.status === 'paid') && closureMilestones.some((m) => m.status === 'overdue'),
+    closureMilestones.map((m) => `${m.label}:${m.status}`).join(' ') || '无节点',
+  );
+  const closureCash = paymentSummary(addDays(-365));
+  check('回款汇总能反映已收与逾期', closureCash.collected > 0 && closureCash.overdueCount > 0, `已收 ${closureCash.collected.toFixed(0)} / 逾期 ${closureCash.overdueCount} 笔`);
+  await drainQueue();
 
   console.log('\n【19】收尾：队列必须干净');
   // Recording a win fans out to the proforma invoice and the customs

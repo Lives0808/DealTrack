@@ -56,7 +56,13 @@ async function main(): Promise<void> {
 
     console.log('\n▶ 推进一笔成交（生成 PI + 回款节点）、一笔丢单、一笔过期报价…\n');
     const closure = await seedDealClosure();
-    if (closure.won) console.log(`  ✔ 成交：${closure.won} → 已生成形式发票，定金已收、尾款逾期 9 天`);
+    if (closure.won) {
+      console.log(
+        `  ✔ 成交：${closure.won} → 已生成形式发票` +
+          (closure.depositPaid ? '，定金已收' : '，定金待收') +
+          '，尾款逾期 9 天',
+      );
+    }
     if (closure.lost) console.log(`  ✘ 丢单：${closure.lost}（原因：价格偏高）`);
     if (closure.expired) console.log(`  ⏳ 过期：${closure.expired}（有效期已回退 12 天）`);
 
