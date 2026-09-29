@@ -6,7 +6,7 @@
  * real agent pipeline so the dashboard has something to show.
  */
 import { getDb } from '../core/db.js';
-import { seedDatabase, seedSampleInquiries, summarize } from './seed.js';
+import { seedDatabase, seedDealClosure, seedSampleInquiries, summarize } from './seed.js';
 import { startOrchestrator } from '../agents/orchestrator.js';
 import { config } from '../core/config.js';
 
@@ -53,6 +53,12 @@ async function main(): Promise<void> {
       last = stats;
       await new Promise((resolve) => setTimeout(resolve, 700));
     }
+
+    console.log('\n▶ 推进一笔成交（生成 PI + 回款节点）、一笔丢单、一笔过期报价…\n');
+    const closure = await seedDealClosure();
+    if (closure.won) console.log(`  ✔ 成交：${closure.won} → 已生成形式发票，定金已收、尾款逾期 9 天`);
+    if (closure.lost) console.log(`  ✘ 丢单：${closure.lost}（原因：价格偏高）`);
+    if (closure.expired) console.log(`  ⏳ 过期：${closure.expired}（有效期已回退 12 天）`);
 
     await orchestrator.stop();
     const summary = summarize(getDb());

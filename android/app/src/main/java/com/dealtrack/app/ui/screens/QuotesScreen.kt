@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AlertDialog
@@ -155,7 +156,10 @@ fun QuoteDetailScreen(
     onSend: () -> Unit,
     onOpenDocument: (String) -> Unit,
     onOpenDeclaration: (String) -> Unit,
+    onOpenProforma: (String) -> Unit,
     onRecordOutcome: (String, String, String?, String?) -> Unit,
+    onMarkPaid: (String, Double) -> Unit,
+    onRemindPayment: (String) -> Unit,
 ) {
     val quote = state.quote
     var outcomeFor by remember { mutableStateOf<Quote?>(null) }
@@ -253,6 +257,96 @@ fun QuoteDetailScreen(
                 if (quote.insurance > 0) KeyValueRow("保险", formatMoney(quote.insurance, quote.currency))
                 KeyValueRow("成本", formatMoney(quote.costTotal, quote.currency))
                 KeyValueRow("总价", formatMoney(quote.total, quote.currency), MaterialTheme.colorScheme.primary)
+            }
+        }
+
+        // ---- Proforma invoice & money ---------------------------------------
+        // The quote is only half the deal. Once it is won, the question changes
+        // from "will they buy?" to "have they paid?" — and that is the half you
+        // actually need on a phone.
+        // Deliberately an `if` rather than `?.let {}`: inside a LazyColumn's
+        // LazyListScope, `item` resolves more predictably from a direct branch
+        // than from a lambda that hides the scope.
+        val proforma = state.proforma
+        if (proforma != null) {
+            item {
+                SectionCard(
+                    title = "形式发票 ${proforma.piNo}",
+                    subtitle = "签发 ${shortDateTime(proforma.issuedAt)} · ${proforma.incoterm} ${proforma.incotermPlace}",
+                    trailing = {
+                        OutlinedButton(onClick = { onOpenProforma(quote.id) }) { Text("打开 PI") }
+                    },
+                ) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("总额", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(formatMoney(proforma.total, proforma.currency), style = MaterialTheme.typography.titleMedium)
+                        }
+                        Text(
+                            when (proforma.status) {
+                                "paid" -> "已全款"
+                                "deposit_paid" -> "定金已收"
+                                else -> "待收款"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when (proforma.status) {
+                                "paid", "deposit_paid" -> Color(0xFF1C7A3D)
+                                else -> Color(0xFFD97706)
+                            },
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    proforma.milestones.forEach { milestone ->
+                        val overdue = milestone.status == "overdue"
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    when (milestone.label) {
+                                        "deposit" -> "定金"
+                                        "balance" -> "尾款"
+                                        else -> milestone.label
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Text(
+                                    "应付 " + shortDateTime(milestone.dueAt) +
+                                        if (overdue) "（已逾期）" else "",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (overdue) Color(0xFFD02F2F) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                formatMoney(milestone.amount, milestone.currency),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            if (milestone.status == "paid") {
+                                Icon(Icons.Filled.Check, contentDescription = "已收", tint = Color(0xFF1C7A3D))
+                            } else {
+                                Button(
+                                    onClick = { onMarkPaid(milestone.id, milestone.amount) },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                ) { Text("登记收款", style = MaterialTheme.typography.bodySmall) }
+                            }
+                        }
+                        if (milestone.status != "paid") {
+                            OutlinedButton(
+                                onClick = { onRemindPayment(milestone.id) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(Icons.Filled.Notifications, contentDescription = null)
+                                Text("  让 AI 起草催款")
+                            }
+                        }
+                    }
+                }
             }
         }
 

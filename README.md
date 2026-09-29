@@ -106,7 +106,8 @@ DealTrack 把第一项压到 **3 分钟**（AI 做完 27 分钟，你只审 3 �
 ![回款看板](docs/screenshots/05-payments.png)
 
 ### 产品库
-数量分档成本 + 目标毛利，报价引擎的直接输入。
+数量分档成本 + 目标毛利 + **多语言别名**，报价引擎的直接输入。
+别名让「ステンレスボトル」「termo」「Thermosflasche」都能命中同一个 SKU —— 客户用母语写，产品库不必翻译成英文才认得出。
 
 ![产品库](docs/screenshots/06-products.png)
 
@@ -152,13 +153,14 @@ npm start                   # 启动：http://localhost:8787
 npm run smoke --workspace=server
 ```
 
-端到端冒烟测试，**83 项断言**，覆盖从「一封德文询盘进来」到「成交开 PI、收定金、改版报价」的全链路：
+端到端冒烟测试，**84 项断言**，覆盖从「一封德文询盘进来」到「成交开 PI、收定金、改版报价」的全链路：
 
 ```
 【2】多语言询盘接入（6 条）
   ✔ 语言自动识别 — de/es/en/pt/ru/ja
 【3】智能体流水线
   ✔ 产品库匹配命中 — 6/6 条匹配到 SKU
+  ✔ 多语言产品匹配（别名） — ja→MUG-INSUL-500 pt→CAMP-CHAIR-XL ru→EBIKE-MTR-500 es→SOLAR-PNL-450 de→LED-WORK-50W
 【4】报价生成
   ✔ 毛利为正且可审计 — 24.0%/17.0%/27.6%/...
   ✔ CIF 报价含运费分摊 — QT-202609-0004 USD2400
@@ -361,6 +363,7 @@ DEALTRACK_CHROME_PATH=
 | 未匹配产品库的行被静默丢弃 | 问 3 个只报 2 个 |
 | SKU 里的数字段匹配到数量 | 无关行被安上错误产品 |
 | 报价改版链表断裂 | 谈判历史只剩一版 |
+| 离线引擎无法跨语言匹配产品 | 日文询盘被报价成完全不相干的产品 |
 
 完整清单见 [CHANGELOG](CHANGELOG.md)，未做项与取舍见 [KNOWN-GAPS](docs/KNOWN-GAPS.md)。
 

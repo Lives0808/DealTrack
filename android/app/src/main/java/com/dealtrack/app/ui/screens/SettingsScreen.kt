@@ -162,7 +162,7 @@ fun SettingsScreen(
 
         item {
             SectionCard(title = "关于") {
-                KeyValueRow("应用版本", "0.1.0")
+                KeyValueRow("应用版本", "0.2.0")
                 KeyValueRow("协议", "MIT")
                 KeyValueRow("定位", "跨境小卖家的数字外贸团队")
                 Spacer(Modifier.height(4.dp))

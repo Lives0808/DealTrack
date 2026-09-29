@@ -1,7 +1,7 @@
 {
   "name": "dealtrack",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DealTrack — 跨境小卖家的 AI 数字外贸团队：询盘 → 报价 → 跟进，30分钟/封变3分钟/封，不漏跟",
   "workspaces": [
     "server",

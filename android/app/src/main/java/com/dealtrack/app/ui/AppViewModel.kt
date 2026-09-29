@@ -10,6 +10,7 @@ import com.dealtrack.app.data.model.Followup
 import com.dealtrack.app.data.model.Health
 import com.dealtrack.app.data.model.Inquiry
 import com.dealtrack.app.data.model.Overview
+import com.dealtrack.app.data.model.ProformaInvoice
 import com.dealtrack.app.data.model.Quote
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +31,7 @@ data class UiState(
     val inquiry: Inquiry? = null,
     val quotes: List<Quote> = emptyList(),
     val quote: Quote? = null,
+    val proforma: ProformaInvoice? = null,
     val followups: List<Followup> = emptyList(),
     val serverUrl: String = "",
     val token: String = "",
@@ -136,12 +138,38 @@ class AppViewModel(
     }
 
     fun loadQuote(id: String, listItem: Quote? = null) {
-        update { it.copy(quote = listItem, loading = true) }
+        update { it.copy(quote = listItem, proforma = null, loading = true) }
         viewModelScope.launch {
             runCatching { repository.quote(id) }
                 .onSuccess { quote -> update { it.copy(loading = false, quote = quote) } }
                 .onFailure { error -> update { it.copy(loading = false, error = error.message) } }
+            // A missing PI just means the deal is not won yet — not an error
+            // worth putting in front of the user.
+            repository.quoteProforma(id)?.let { pi -> update { it.copy(proforma = pi) } }
         }
+    }
+
+    /**
+     * Record a payment landing.
+     *
+     * This is the single most useful thing to do from a phone: the money arrives
+     * while you are away from your desk, and the alternative is remembering to
+     * update it later (which means never).
+     */
+    fun markPaid(milestoneId: String, amount: Double, method: String? = null) =
+        action("已登记收款") {
+            repository.markPaid(milestoneId, amount, method)
+            _state.value.quote?.id?.let { quoteId ->
+                repository.quoteProforma(quoteId)?.let { pi -> update { it.copy(proforma = pi) } }
+                runCatching { repository.quote(quoteId) }.onSuccess { fresh ->
+                    update { it.copy(quote = fresh) }
+                }
+            }
+            refreshAll()
+        }
+
+    fun remindPayment(milestoneId: String) = action("催款草稿已排入生成队列") {
+        repository.remindPayment(milestoneId)
     }
 
     fun loadQuotes(status: String) {

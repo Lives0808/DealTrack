@@ -30,6 +30,13 @@ export interface Product {
   tiers?: PriceTier[];
 }
 
+/** Localized names, synonyms and trade terms for a product. */
+export function productAliases(product: Pick<Product, 'spec'>): string[] {
+  const raw = (product.spec as { aliases?: unknown } | null)?.aliases;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 1);
+}
+
 export function mapProduct(row: Row, withTiers = false): Product {
   const product: Product = {
     id: String(row.id),
@@ -221,6 +228,10 @@ export function matchProducts(
       ['category', product.category ?? '', 2],
       ['description_en', product.descriptionEn ?? '', 1],
       ['description_zh', product.descriptionZh ?? '', 1],
+      // Localized aliases. Without these a Japanese or Spanish inquiry can only
+      // match by accident — e.g. the "500" in `MUG-INSUL-500` matching "500ml" —
+      // which is how the wrong product ends up on a quotation.
+      ['aliases', productAliases(product).join(' '), 3],
     ];
 
     for (const [field, value, weight] of haystacks) {

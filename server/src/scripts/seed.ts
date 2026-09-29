@@ -1,4 +1,4 @@
-import { getDb, type Database } from '../core/db.js';
+import { getDb, type Database, type Row } from '../core/db.js';
 import { config } from '../core/config.js';
 import { seedFxRates, createRule } from '../core/pricing.js';
 import { SETTING_KEYS, setSetting, DEFAULT_COMPANY, DEFAULT_AUTOMATION, DEFAULT_SALES } from '../core/settings.js';
@@ -31,6 +31,16 @@ interface SeedProduct {
   certifications: string[];
   targetMarkets: string[];
   descriptionEn: string;
+  /**
+   * Localized names, synonyms and trade terms.
+   *
+   * The product library is written in English and Chinese, but inquiries arrive
+   * in Japanese, Spanish, German, Russian… Without aliases the offline matcher
+   * can only agree by accident (a "500" in a SKU agreeing with "500ml"), which
+   * is how the wrong product gets onto a quotation. These also make the real-LLM
+   * path cheaper: fewer tokens spent explaining what a "ステンレスボトル" is.
+   */
+  aliases: string[];
   /** [minQty, unitCostCNY, margin, listPriceUSD?] */
   tiers: Array<[number, number, number]>;
 }
@@ -51,6 +61,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['CE', 'RoHS', 'FCC'],
     targetMarkets: ['DE', 'US', 'AE', 'AU'],
     descriptionEn: 'IP65 die-cast aluminium housing, 5000lm, 5m rubber cable, foldable stand, 100-265V.',
+    aliases: ['work light','floodlight','LED flood light','作業灯','LED投光器','ワークライト','工作灯','投光灯','luz de trabajo','reflector LED','Arbeitsstrahler','Arbeitsleuchte','прожектор','светильник','holofote LED'],
     tiers: [
       [200, 46, 0.22],
       [1000, 41, 0.2],
@@ -73,6 +84,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['CE', 'TUV', 'INMETRO'],
     targetMarkets: ['BR', 'DE', 'CL', 'ZA'],
     descriptionEn: 'Half-cell PERC, 21.3% efficiency, anodised frame, 25-year output warranty.',
+    aliases: ['solar module','PV module','太陽光パネル','ソーラーパネル','太阳能板','太阳能组件','panel solar','Solarmodul','солнечная панель','painel solar'],
     tiers: [
       [50, 620, 0.16],
       [200, 578, 0.14],
@@ -95,6 +107,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['CE', 'RoHS', 'FCC', 'UN38.3'],
     targetMarkets: ['US', 'DE', 'JP', 'KR'],
     descriptionEn: 'Grade-A cells, 65W PD in/out, digital display, airline-safe UN38.3 report on file.',
+    aliases: ['power bank','battery pack','portable charger','モバイルバッテリー','充電器','移动电源','充电宝','batería externa','Powerbank','повербанк','внешний аккумулятор','carregador portátil'],
     tiers: [
       [500, 118, 0.24],
       [2000, 106, 0.21],
@@ -117,6 +130,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['CE', 'RoHS', 'FCC'],
     targetMarkets: ['US', 'GB', 'DE', 'NL'],
     descriptionEn: 'HDMI 4K60, 2×USB3.0, SD/TF, 100W PD passthrough, Gigabit Ethernet, aluminium shell.',
+    aliases: ['USB hub','dock','docking station','USBハブ','ドッキングステーション','扩展坞','集线器','hub USB','Dockingstation','USB-Hub','док-станция','хаб'],
     tiers: [
       [500, 74, 0.26],
       [2000, 66, 0.23],
@@ -139,6 +153,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['CE', 'RoHS', 'FCC'],
     targetMarkets: ['US', 'BR', 'MX', 'ES'],
     descriptionEn: 'BT5.3, IPX7, 12h playtime, TWS pairing, custom logo and packaging from 3k units.',
+    aliases: ['speaker','bluetooth speaker','portable speaker','スピーカー','ブルートゥーススピーカー','音箱','蓝牙音箱','altavoz','parlante','Lautsprecher','колонка','динамик','caixa de som'],
     tiers: [
       [1000, 42, 0.25],
       [5000, 36.5, 0.22],
@@ -160,6 +175,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['CE', 'EN15194'],
     targetMarkets: ['DE', 'NL', 'FR', 'PL'],
     descriptionEn: '48V 500W geared hub, 45Nm torque, cassette or freewheel, EN15194 test report available.',
+    aliases: ['hub motor','e-bike motor','electric motor','モーター','電動自転車','电机','轮毂电机','motor','Nabenmotor','мотор','двигатель'],
     tiers: [
       [100, 385, 0.2],
       [500, 352, 0.17],
@@ -181,6 +197,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['BSCI', 'EN581'],
     targetMarkets: ['US', 'GB', 'AU', 'CA'],
     descriptionEn: 'Oxford 600D, steel 22mm frame, 150kg load, cup holder, carry bag, OEM colours.',
+    aliases: ['camping chair','folding chair','camp chair','キャンプチェア','折りたたみ椅子','露营椅','折叠椅','silla de camping','Campingstuhl','кресло','стул','cadeira de camping'],
     tiers: [
       [500, 78, 0.28],
       [2000, 68, 0.24],
@@ -202,6 +219,7 @@ const PRODUCTS: SeedProduct[] = [
     certifications: ['FDA', 'LFGB'],
     targetMarkets: ['US', 'DE', 'JP'],
     descriptionEn: '304 内胆 + 316 外壳, 12h hot / 24h cold, powder coating, laser logo, FDA/LFGB compliant.',
+    aliases: ['vacuum flask','thermos','travel mug','insulated bottle','vacuum bottle','ステンレスボトル','真空断熱ボトル','水筒','タンブラー','保温杯','真空杯','水杯','termo','botella térmica','Thermosflasche','Isolierflasche','термос','бутылка','garrafa térmica','copo térmico'],
     tiers: [
       [1000, 34, 0.3],
       [5000, 29, 0.26],
@@ -541,6 +559,7 @@ export async function seedDatabase(options: { reset?: boolean; verbose?: boolean
       cbm: product.cbm,
       certifications: product.certifications,
       targetMarkets: product.targetMarkets,
+      spec: { aliases: product.aliases },
       status: 'active',
     });
 
@@ -776,6 +795,92 @@ Aventura Brasil`,
 よろしくお願いいたします。`,
   },
 ];
+
+/**
+ * Close part of the demo pipeline so a fresh install shows the whole story.
+ *
+ * Without this the console opens on an empty 回款看板 and a funnel that stops at
+ * "quoted" — which makes the newest half of the product invisible to anyone
+ * evaluating it. Everything here goes through the real code paths, so the
+ * resulting PI, milestones and outcomes are exactly what production produces.
+ */
+export async function seedDealClosure(): Promise<{
+  won: string | null;
+  lost: string | null;
+  expired: string | null;
+}> {
+  const { recordOutcome, updateQuote } = await import('../core/repos/quoting.js');
+  const { getPiByQuote, markMilestonePaid, dueMilestones } = await import('../core/repos/billing.js');
+  const { getQueue } = await import('../core/queue.js');
+
+  const quotes = getDb()
+    .all<Row>('SELECT * FROM quotes ORDER BY created_at ASC')
+    .map((row) => ({ id: String(row.id), quoteNo: String(row.quote_no) }));
+  if (quotes.length === 0) return { won: null, lost: null, expired: null };
+
+  // ---- One win, with the deposit already received --------------------------
+  const winner = quotes[quotes.length - 1]!;
+  recordOutcome({
+    quoteId: winner.id,
+    result: 'won',
+    reasonNote: '客户邮件确认下单，合同条款无异议',
+    decidedBy: 'user:ops',
+  });
+
+  // Let the orchestrator issue the PI and lay down the payment schedule.
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const queued = getDb().count("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('queued','running')");
+    if (queued === 0 && getPiByQuote(winner.id)) break;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+
+  const pi = getPiByQuote(winner.id);
+  if (pi) {
+    const deposit = dueMilestones().find((entry) => entry.piId === pi.id && entry.label === 'deposit');
+    if (deposit) {
+      markMilestonePaid({
+        id: deposit.id,
+        method: 'T/T',
+        note: '演示数据：定金已到账（水单号 DEMO-0001）',
+      });
+    }
+    // Push the balance payment past due so the collection board has something to
+    // chase — an empty overdue column teaches the user nothing.
+    const balance = (pi.milestones ?? []).find((entry) => entry.label === 'balance');
+    if (balance) {
+      getDb().run(
+        'UPDATE payment_milestones SET due_at = ? WHERE id = ?',
+        new Date(Date.now() - 9 * 86_400_000).toISOString(),
+        balance.id,
+      );
+    }
+  }
+
+  // ---- One loss, for the attribution board --------------------------------
+  const loser = quotes.length > 1 ? quotes[quotes.length - 2]! : null;
+  if (loser) {
+    recordOutcome({
+      quoteId: loser.id,
+      result: 'lost',
+      reasonCode: 'price',
+      reasonNote: '客户反馈比越南供应商高 8%，砍价未达成',
+      competitor: 'Vietnam supplier',
+      decidedBy: 'user:sales',
+    });
+  }
+
+  // ---- One lapsed quote, so the expiry sweep has material -----------------
+  const lapsed = quotes.length > 2 ? quotes[2]! : null;
+  if (lapsed) {
+    updateQuote(lapsed.id, {
+      valid_until: new Date(Date.now() - 12 * 86_400_000).toISOString(),
+      status: 'sent',
+    });
+  }
+
+  return { won: winner.quoteNo, lost: loser?.quoteNo ?? null, expired: lapsed?.quoteNo ?? null };
+}
 
 /** Inject the sample inquiries and run them through the real pipeline. */
 export async function seedSampleInquiries(): Promise<Array<{ label: string; inquiryId: string; code: string }>> {

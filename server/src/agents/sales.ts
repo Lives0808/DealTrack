@@ -17,7 +17,7 @@ import {
   type Customer,
   type Inquiry,
 } from '../core/repos/sales.js';
-import { listProducts, getProduct, matchProducts, type Product } from '../core/repos/catalog.js';
+import { listProducts, getProduct, matchProducts, productAliases, type Product } from '../core/repos/catalog.js';
 import {
   createQuote,
   getQuote,
@@ -147,6 +147,9 @@ async function parseInquiry(payload: Record<string, unknown>, ctx: AgentContext)
     name_en: product.nameEn,
     name_zh: product.nameZh ?? '',
     category: product.category ?? '',
+    // Localized aliases travel with the catalog so the offline extractor can
+    // recognise a Japanese or Spanish product name, not just English/Chinese.
+    aliases: productAliases(product),
   }));
 
   const { data: extracted, usedFallback, response } = await ctx.ask({

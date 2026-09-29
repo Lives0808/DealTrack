@@ -133,6 +133,31 @@ async function main(): Promise<void> {
   const withMatches = parsed.filter((inquiry) => inquiry.productMatches.length > 0);
   check('产品库匹配命中', withMatches.length >= 4, `${withMatches.length}/${parsed.length} 条匹配到 SKU`);
 
+  // Cross-language product matching. This is the promise the whole product rests
+  // on — a Japanese inquiry naming a "ステンレスボトル" must reach the vacuum
+  // flask, not whichever SKU happens to share a number with "500ml".
+  const expectedByLanguage: Record<string, string> = {
+    de: 'LED-WORK-50W',
+    es: 'SOLAR-PNL-450',
+    pt: 'CAMP-CHAIR-XL',
+    ru: 'EBIKE-MTR-500',
+    ja: 'MUG-INSUL-500',
+    en: 'PWRBANK-20K',
+  };
+  const languageMatches = parsed.map((inquiry) => {
+    const expected = expectedByLanguage[inquiry.language ?? ''];
+    const matched = inquiry.productMatches.map((entry) => entry.sku);
+    return { language: inquiry.language, expected, matched, ok: Boolean(expected && matched.includes(expected)) };
+  });
+  const wrongLanguage = languageMatches.filter((entry) => !entry.ok);
+  check(
+    '多语言产品匹配（别名）',
+    wrongLanguage.length === 0,
+    wrongLanguage.length === 0
+      ? languageMatches.map((entry) => `${entry.language}→${entry.matched[0] ?? '?'}`).join(' ')
+      : wrongLanguage.map((entry) => `${entry.language} 期望 ${entry.expected} 实得 ${entry.matched.join('/')}`).join('; '),
+  );
+
   const extracted = parsed.map((inquiry) => inquiry.parsed as Record<string, unknown>);
   const qtyExtracted = extracted.filter((p) => {
     const products = (p.products ?? []) as Array<Record<string, unknown>>;

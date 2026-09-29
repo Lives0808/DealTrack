@@ -474,20 +474,29 @@ function extractOffline(text: string, context: Record<string, unknown>): Extract
   const products: Array<Record<string, unknown>> = [];
   if (mentions.length > 0) {
     for (const mention of mentions) {
-      // Hint from THIS line only.
+      // Resolve the product for this line, widening the search only as far as is
+      // safe.
       //
-      // v1 passed the whole email, so the product-library match scored against
-      // every line at once and resolved every item to whichever product the
-      // email mentioned first. Two-item RFQs came out as two lines of the same
-      // SKU, and a line that could not be matched was silently given someone
-      // else's product instead of being flagged.
-      let hint = inferProductHint(mention.line, context);
-      if (hint === 'requested item') {
-        // Fall back to the subject, which often names the product when the line
-        // itself is just quantities.
-        hint = inferProductHint(String(context.subject ?? ''), context);
+      // v1 scored every line against the whole email, so a two-item RFQ resolved
+      // both lines to whichever product was mentioned first. The opposite
+      // extreme — the line alone — loses the product entirely for messages that
+      // state the item once and the quantity separately ("ステンレスボトル
+      // 500ml" in the subject, "10,000個" in the body).
+      //
+      // So: the line first; then the subject; and the whole message only when
+      // there is a single line item, where an ambiguous match cannot happen.
+      let resolved = inferProductHint(mention.line, context);
+      if (!resolved.matched) {
+        const viaSubject = inferProductHint(String(context.subject ?? ''), context);
+        if (viaSubject.matched) resolved = viaSubject;
       }
-      // A bare number line ("2. 3,000 pcs 7-in-1 USB-C Hub") is common in RFQs;
+      if (!resolved.matched && mentions.length === 1) {
+        const viaMessage = inferProductHint(scanText, context);
+        if (viaMessage.matched) resolved = viaMessage;
+      }
+
+      const hint = resolved.hint;
+      // A bare number line ("2. 3,000 pcs 7-in-1 USB-C Hub") is common in RFQs.
       // Strip a leading list marker, but ONLY when a real separator follows it —
       // otherwise "500ml Vacuum Insulated Mug" quietly becomes "ml … Mug".
       const cleaned = hint.replace(/^\s*\d{1,2}\s*[.)、]\s*/, '').trim();
@@ -554,13 +563,25 @@ function extractOffline(text: string, context: Record<string, unknown>): Extract
   };
 }
 
-function inferProductHint(text: string, context: Record<string, unknown>): string {
-  const catalog = context.catalog as Array<{ sku: string; name_en: string; name_zh?: string }> | undefined;
+/**
+ * Guess which catalogue product a fragment of text refers to.
+ *
+ * `matched: false` means we are guessing at a name, not identifying a product.
+ * Callers use that to decide whether to widen the search or to record the line as
+ * unmatched — which is what keeps a wrong product off a quotation.
+ */
+function inferProductHint(
+  text: string,
+  context: Record<string, unknown>,
+): { hint: string; matched: boolean } {
+  const catalog = context.catalog as
+    | Array<{ sku: string; name_en: string; name_zh?: string; aliases?: string[] }>
+    | undefined;
   if (catalog?.length) {
     const lowered = text.toLowerCase();
     let best: { hint: string; score: number } | null = null;
     for (const product of catalog) {
-      const tokens = `${product.name_en} ${product.name_zh ?? ''} ${product.sku}`
+      const tokens = `${product.name_en} ${product.name_zh ?? ''} ${product.sku} ${(product.aliases ?? []).join(' ')}`
         .toLowerCase()
         .split(/[\s,/|-]+/)
         // Bare numbers carry no product identity — "500" in `MUG-INSUL-500`
@@ -568,9 +589,12 @@ function inferProductHint(text: string, context: Record<string, unknown>): strin
         // the mug as its product.
         .filter((t) => t.length > 2 && !/^\d+$/.test(t));
       const score = tokens.reduce((acc, token) => (lowered.includes(token) ? acc + 1 : acc), 0);
-      if (score > 0 && (!best || score > best.score)) best = { hint: product.name_en, score };
+      // Two hits, or one long distinctive one. A single short token is noise:
+      // "pro" matching the middle of an unrelated word is not identification.
+      const strong = score >= 2 || (score === 1 && tokens.some((t) => t.length > 5 && lowered.includes(t)));
+      if (strong && (!best || score > best.score)) best = { hint: product.name_en, score };
     }
-    if (best) return best.hint;
+    if (best) return { hint: best.hint, matched: true };
   }
 
   // Fall back to the noun phrase following "need/want/require/interested in".
@@ -578,7 +602,7 @@ function inferProductHint(text: string, context: Record<string, unknown>): strin
     /(?:need|want|require|looking for|interested in|enquiry for|inquiry for|quote for|purchase|buy|order)\s+(?:about\s+|for\s+)?([^.,;\n]{3,80})/i.exec(
       text,
     );
-  if (match) return match[1]!.trim().replace(/\s+/g, ' ');
+  if (match) return { hint: match[1]!.trim().replace(/\s+/g, ' '), matched: false };
 
   // Nothing matched: quote the customer's own line back to them, minus the list
   // bullet. Their words describe the item better than any normalisation we could
@@ -588,7 +612,7 @@ function inferProductHint(text: string, context: Record<string, unknown>): strin
     .replace(/^\s*(?:[-*•・]|\d{1,2}[.)、])\s*/, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
-  return fallback.length > 2 ? fallback : 'requested item';
+  return { hint: fallback.length > 2 ? fallback : 'requested item', matched: false };
 }
 
 export function guessPort(country: string): string | null {

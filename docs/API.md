@@ -300,9 +300,9 @@ curl -X POST http://localhost:8787/api/agents/run \
 |---|---|---|
 | GET | `/api/products` | 列表（含价格阶梯） |
 | GET | `/api/products/:id` | 详情 + 该产品的历史报价 |
-| POST | `/api/products` | 新建（可同时带 `tiers`） |
+| POST | `/api/products` | 新建（可同时带 `tiers`，以及 `spec.aliases` 多语言别名） |
 | PATCH | `/api/products/:id` | 更新（可同时带 `tiers`） |
-| POST | `/api/products/match` | 品名模糊匹配产品库 |
+| POST | `/api/products/match` | 品名模糊匹配产品库（命中 `spec.aliases`，支持跨语言） |
 
 ---
 

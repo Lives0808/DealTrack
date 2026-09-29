@@ -270,6 +270,9 @@ private fun DealTrackRoot() {
                     onSend = { viewModel.sendQuote(current.id) },
                     onOpenDocument = { openUrl(app.repository.quoteDocumentUrl(it)) },
                     onOpenDeclaration = { openUrl(app.repository.declarationUrl(it)) },
+                    onOpenProforma = { openUrl(app.repository.proformaUrl(it)) },
+                    onMarkPaid = { milestoneId, amount -> viewModel.markPaid(milestoneId, amount) },
+                    onRemindPayment = { milestoneId -> viewModel.remindPayment(milestoneId) },
                     onRecordOutcome = { quoteId, result, reason, note ->
                         viewModel.recordOutcome(quoteId, result, reason, note)
                     },
