@@ -1,6 +1,6 @@
 {
   "name": "@dealtrack/server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "DealTrack server — multi-agent orchestrator, pricing engine, integrations and REST/SSE API",

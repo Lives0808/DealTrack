@@ -58,6 +58,12 @@ export interface Phrasebook {
   objectionLeadTime: string;
   leadTimeNote: string;      // {days}
   attachmentsNote: string;
+  /** 催款：说明款项仍未到账 */
+  paymentDueIntro: string;
+  /** 催款：要一个具体的付款时间，而不是催逼 */
+  paymentReminderCta: string;
+  /** 催款：逾期天数，含 {days} */
+  paymentLateNote: string;
   signatureRole: string;
   signatureCompany: string;
   signatureContact: string;
@@ -125,6 +131,9 @@ const ENGLISH: Phrasebook = {
   objectionLeadTime:
     'Lead time is something we can move on for you — we hold buffer stock on our best-selling lines.',
   leadTimeNote: 'Lead time is {days} days after deposit.',
+  paymentDueIntro: 'According to our records, the following amount is still outstanding:',
+  paymentReminderCta: 'Could you let us know when it is scheduled? If a copy of the proforma invoice or a revised payment schedule would help, tell me and I will send it right away.',
+  paymentLateNote: '{days} days have passed since the original due date.',
   attachmentsNote: 'Attached: quotation and specification sheet.',
   signatureRole: 'Sales Manager',
   signatureCompany: '',
@@ -166,6 +175,9 @@ const CHINESE: Phrasebook = {
   objectionPrice: '理解价格是关键因素。我先说明我们的成本构成，并给出两个在不降质量前提下把价格做下来的方法。',
   objectionLeadTime: '交期是可以想办法的——我们的热销款备有缓冲库存。',
   leadTimeNote: '定金到账后 {days} 天交货。',
+  paymentDueIntro: '根据我们的记录，以下款项仍未到账：',
+  paymentReminderCta: '方便告诉我预计的付款时间吗？如果需要形式发票副本或调整后的付款计划，告诉我，我马上发过去。',
+  paymentLateNote: '距离原定付款日已过去 {days} 天。',
   attachmentsNote: '附件：报价单与规格表。',
   signatureRole: '销售经理',
   signatureCompany: '',
@@ -214,6 +226,9 @@ const SPANISH: Phrasebook = {
   objectionLeadTime:
     'El plazo de entrega sí podemos ajustarlo: mantenemos stock de reserva en nuestras líneas más vendidas.',
   leadTimeNote: 'El plazo de entrega es de {days} días tras el depósito.',
+  paymentDueIntro: 'Según nuestros registros, el siguiente importe sigue pendiente:',
+  paymentReminderCta: '¿Podría indicarnos cuándo está previsto el pago? Si le viene bien una copia de la factura proforma o un calendario de pagos revisado, dígamelo y se lo envío ahora mismo.',
+  paymentLateNote: 'Han transcurrido {days} días desde la fecha de vencimiento original.',
   attachmentsNote: 'Adjuntos: cotización y ficha técnica.',
   signatureRole: 'Gerente de Ventas',
   signatureCompany: '',
@@ -262,6 +277,9 @@ const FRENCH: Phrasebook = {
   objectionLeadTime:
     'Le délai de livraison est ajustable : nous gardons du stock tampon sur nos références les plus vendues.',
   leadTimeNote: 'Le délai de livraison est de {days} jours après l’acompte.',
+  paymentDueIntro: 'Selon nos relevés, le montant suivant reste impayé :',
+  paymentReminderCta: 'Pourriez-vous nous indiquer la date de paiement prévue ? Si une copie de la facture proforma ou un échéancier révisé vous aide, dites-le moi et je vous l’envoie immédiatement.',
+  paymentLateNote: '{days} jours se sont écoulés depuis la date d’échéance initiale.',
   attachmentsNote: 'Pièces jointes : devis et fiche technique.',
   signatureRole: 'Responsable des ventes',
   signatureCompany: '',
@@ -310,6 +328,9 @@ const GERMAN: Phrasebook = {
   objectionLeadTime:
     'Bei der Lieferzeit ist etwas möglich: Für unsere Bestseller halten wir Pufferbestand vor.',
   leadTimeNote: 'Die Lieferzeit beträgt {days} Tage nach Anzahlung.',
+  paymentDueIntro: 'Nach unseren Unterlagen ist der folgende Betrag noch offen:',
+  paymentReminderCta: 'Könnten Sie uns mitteilen, wann die Zahlung geplant ist? Wenn Ihnen eine Kopie der Proformarechnung oder ein angepasster Zahlungsplan hilft, sagen Sie Bescheid — ich sende ihn sofort.',
+  paymentLateNote: 'Seit dem ursprünglichen Fälligkeitsdatum sind {days} Tage vergangen.',
   attachmentsNote: 'Anlagen: Angebot und Datenblatt.',
   signatureRole: 'Vertriebsleiter',
   signatureCompany: '',
@@ -358,6 +379,9 @@ const RUSSIAN: Phrasebook = {
   objectionLeadTime:
     'Со сроками поставки мы можем поработать: по самым продаваемым позициям у нас есть запас.',
   leadTimeNote: 'Срок поставки — {days} дней после предоплаты.',
+  paymentDueIntro: 'По нашим данным, следующая сумма ещё не поступила:',
+  paymentReminderCta: 'Подскажите, пожалуйста, когда планируется оплата? Если поможет копия проформы-счёта или скорректированный график платежей — напишите, отправлю сразу.',
+  paymentLateNote: 'С первоначальной даты оплаты прошло {days} дней.',
   attachmentsNote: 'Во вложении: предложение и спецификация.',
   signatureRole: 'Руководитель отдела продаж',
   signatureCompany: '',
@@ -406,6 +430,9 @@ const ARABIC: Phrasebook = {
   objectionLeadTime:
     'مدة التسليم قابلة للتحسين: نحتفظ بمخزون احتياطي من أكثر منتجاتنا مبيعًا.',
   leadTimeNote: 'مدة التسليم {days} يومًا بعد الدفعة المقدمة.',
+  paymentDueIntro: 'وفقًا لسجلاتنا، لا يزال المبلغ التالي مستحقًا:',
+  paymentReminderCta: 'هل يمكنكم إخبارنا بالموعد المتوقع للدفع؟ إذا كان إرسال نسخة من الفاتورة المبدئية أو جدول دفع معدّل مفيدًا، أخبروني وسأرسله فورًا.',
+  paymentLateNote: 'مضى {days} يومًا على تاريخ الاستحقاق الأصلي.',
   attachmentsNote: 'المرفقات: عرض السعر وورقة المواصفات.',
   signatureRole: 'مدير المبيعات',
   signatureCompany: '',
@@ -454,6 +481,9 @@ const PORTUGUESE: Phrasebook = {
   objectionLeadTime:
     'O prazo de entrega é negociável: mantemos estoque de segurança nas linhas mais vendidas.',
   leadTimeNote: 'O prazo de entrega é de {days} dias após o depósito.',
+  paymentDueIntro: 'Segundo os nossos registos, o seguinte valor continua em aberto:',
+  paymentReminderCta: 'Pode indicar-nos quando está previsto o pagamento? Se uma cópia da fatura proforma ou um plano de pagamento revisto ajudar, diga-me e envio de imediato.',
+  paymentLateNote: 'Passaram {days} dias desde a data de vencimento original.',
   attachmentsNote: 'Anexos: cotação e ficha técnica.',
   signatureRole: 'Gerente de Vendas',
   signatureCompany: '',
@@ -502,6 +532,9 @@ const JAPANESE: Phrasebook = {
   objectionLeadTime:
     '納期は調整可能です。売れ筋商品は緩衝在庫を確保しております。',
   leadTimeNote: '納期はご入金後 {days} 日です。',
+  paymentDueIntro: '弊社の記録では、以下の金額がまだお支払いいただいておりません：',
+  paymentReminderCta: 'お支払いのご予定をお知らせいただけますか。プロフォーマインボイスの写しや支払スケジュールの再調整が必要でしたら、お申し付けください。すぐにお送りいたします。',
+  paymentLateNote: '当初の支払期日から {days} 日が経過しております。',
   attachmentsNote: '添付：お見積書、仕様書。',
   signatureRole: '営業部長',
   signatureCompany: '',
@@ -550,6 +583,9 @@ const KOREAN: Phrasebook = {
   objectionLeadTime:
     '납기는 조정 가능합니다. 가장 잘 팔리는 제품은 완충 재고를 보유하고 있습니다.',
   leadTimeNote: '납기는 입금 후 {days}일입니다.',
+  paymentDueIntro: '저희 기록상 아래 금액이 아직 미결제 상태입니다:',
+  paymentReminderCta: '결제 예정일을 알려 주실 수 있을까요? 견적송장 사본이나 조정된 결제 일정이 필요하시면 말씀해 주세요. 바로 보내드리겠습니다.',
+  paymentLateNote: '원래 납부 기한으로부터 {days}일이 지났습니다.',
   attachmentsNote: '첨부: 견적서 및 사양서.',
   signatureRole: '영업 이사',
   signatureCompany: '',
@@ -717,6 +753,20 @@ const FULL_BOOKS: Record<string, Phrasebook> = {
   ja: JAPANESE,
   ko: KOREAN,
 };
+
+/** Deposit / balance / instalment, in the customer's language. */
+const MILESTONE_LABELS: Record<string, Record<string, string>> = {
+  deposit: { en: 'Deposit', zh: '定金', es: 'Anticipo', fr: 'Acompte', de: 'Anzahlung', ru: 'Аванс', ar: 'الدفعة المقدمة', pt: 'Entrada', ja: '前払金', ko: '계약금' },
+  balance: { en: 'Balance payment', zh: '尾款', es: 'Saldo', fr: 'Solde', de: 'Restbetrag', ru: 'Остаток', ar: 'الرصيد', pt: 'Saldo', ja: '残金', ko: '잔금' },
+  installment: { en: 'Instalment', zh: '分期款', es: 'Cuota', fr: 'Échéance', de: 'Teilzahlung', ru: 'Платёж', ar: 'دفعة', pt: 'Parcela', ja: '分割払い', ko: '분할금' },
+};
+
+export function milestoneLabel(label: string | null | undefined, language: string): string {
+  const key = (label ?? '').toLowerCase();
+  const entry = MILESTONE_LABELS[key];
+  if (!entry) return label ?? '';
+  return entry[language.toLowerCase().split('-')[0]!] ?? entry.en ?? label ?? '';
+}
 
 export function getPhrasebook(lang: string | null | undefined): Phrasebook {
   const code = (lang ?? 'en').toLowerCase().split('-')[0]!;

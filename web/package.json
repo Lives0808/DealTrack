@@ -1,7 +1,7 @@
 {
   "name": "@dealtrack/web",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "DealTrack 控制台 — 老板看板 / 询盘箱 / 报价 / 跟进 / 话术库",
   "scripts": {

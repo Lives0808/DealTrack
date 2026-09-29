@@ -1,4 +1,4 @@
-import { formatDate, formatNumber, getLanguage, isRtl } from '../core/i18n.js';
+import { formatDate, formatNumber, getLanguage, isRtl, milestoneLabel } from '../core/i18n.js';
 import { getCompany, getSalesIdentity } from '../core/settings.js';
 import { getCustomer } from '../core/repos/sales.js';
 import { getPiByQuote, type ProformaInvoice } from '../core/repos/billing.js';
@@ -178,11 +178,6 @@ export function piLabels(language: string): PiLabels {
   return LABELS[language.split('-')[0]!] ?? LABELS.en!;
 }
 
-const MILESTONE_LABELS: Record<string, Record<string, string>> = {
-  deposit: { en: 'Deposit', zh: '定金', es: 'Anticipo', fr: 'Acompte', de: 'Anzahlung', ru: 'Аванс', ar: 'الدفعة المقدمة', pt: 'Entrada', ja: '前払金', ko: '계약금' },
-  balance: { en: 'Balance', zh: '尾款', es: 'Saldo', fr: 'Solde', de: 'Restbetrag', ru: 'Остаток', ar: 'الرصيد', pt: 'Saldo', ja: '残金', ko: '잔금' },
-};
-
 const MILESTONE_STATUS: Record<string, Record<string, string>> = {
   paid: { en: 'Paid', zh: '已付', es: 'Pagado', fr: 'Payé', de: 'Bezahlt', ru: 'Оплачено', ar: 'مدفوع', pt: 'Pago', ja: '支払済', ko: '완납' },
   pending: { en: 'Pending', zh: '待付', es: 'Pendiente', fr: 'En attente', de: 'Offen', ru: 'Ожидает', ar: 'قيد الانتظار', pt: 'Pendente', ja: '未払', ko: '미납' },
@@ -237,7 +232,7 @@ export function buildPiHtmlFrom(pi: ProformaInvoice): { html: string; baseName: 
     .map(
       (milestone) => `
       <tr>
-        <td>${escapeHtml(localized(MILESTONE_LABELS, milestone.label, language, milestone.label))}</td>
+        <td>${escapeHtml(milestoneLabel(milestone.label, language))}</td>
         <td>${date(milestone.dueAt)}</td>
         <td class="num">${escapeHtml(milestone.currency)} ${money(milestone.amount)}</td>
         <td><span class="badge ${milestone.status === 'paid' ? 'ok' : milestone.status === 'overdue' ? 'bad' : 'warn'}">${escapeHtml(

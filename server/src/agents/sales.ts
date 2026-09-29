@@ -810,6 +810,9 @@ export async function composeReply(input: ComposeInput): Promise<{ id: string; c
       marketCount: company.marketCount,
       missingInfo: inquiry.missingInfo,
       unmatchedLines,
+      // Used by the phrasebook sentence "thank you for your inquiry about X" —
+      // X is what they asked for, not who they are.
+      productList: pricedLines.map((line) => line.description).join(', '),
       playbookBody,
       channel,
       lines: pricedLines.map((line) => ({

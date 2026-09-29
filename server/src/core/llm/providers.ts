@@ -1,6 +1,6 @@
 import type { ChatRequest, ChatResponse, LlmProvider, ProviderId, ResolvedProviderConfig } from './types.js';
 import { estimateCost, estimateTokens } from './types.js';
-import { detectLanguage, fill, getPhrasebook, getLanguage } from '../i18n.js';
+import { detectLanguage, fill, formatDate, formatMoney, getPhrasebook, getLanguage, milestoneLabel } from '../i18n.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -815,10 +815,43 @@ function draftEmail(context: Record<string, unknown>, stage: string): string {
     : '';
 
   const bodyByStage: Record<string, string> = {
+    // Payment reminders used to be absent from this map, so the offline writer
+    // fell through to `first_reply` and sent a buyer "thank you for your inquiry"
+    // when we actually wanted money — with the customer's own name where the
+    // product should have been. A wrong stage must never degrade into a wrong
+    // message.
+    payment_reminder: [
+      greeting,
+      '',
+      book.paymentDueIntro,
+      '',
+      `• ${milestoneLabel(String(context.milestoneLabel ?? ''), language)}: ${formatMoney(
+        Number(context.total ?? 0),
+        currency,
+        language,
+      )}`,
+      context.dueDate ? `• ${formatDate(String(context.dueDate), language)}` : '',
+      Number(context.daysLate ?? 0) > 0 ? fill(book.paymentLateNote, { days: Number(context.daysLate) }) : '',
+      context.piNo ? `• ${String(context.piNo)}` : '',
+      '',
+      // The CTA must ask about payment. Reusing the quotation CTA here asked the
+      // buyer to "confirm the quantity and destination port" in a dunning note.
+      book.paymentReminderCta,
+      '',
+      book.closing,
+      sender,
+    ]
+      .filter((line) => line !== '')
+      .join('\n'),
+
     first_reply: [
       greeting,
       '',
-      fill(book.thanksForInquiry, { company: customerCompany || 'your company' }),
+      // `{company}` here means "the thing you asked about". Filling it with the
+      // customer's own name produced "thank you for your inquiry about 田中 健一".
+      fill(book.thanksForInquiry, {
+        company: String(context.productList ?? '') || companySeller || 'our products',
+      }),
       missingBlock || fill(book.quoteReady, { code }),
       '',
       lineTable,
@@ -872,6 +905,8 @@ function draftEmail(context: Record<string, unknown>, stage: string): string {
   };
 
   const subjectByStage: Record<string, string> = {
+    payment_reminder: fill(book.subject.payment, { code: String(context.piNo ?? code) }),
+
     first_reply: fill(book.subject.firstReply, { code }),
     quote_cover: fill(book.subject.quote, { code, company: customerCompany || companySeller }),
     quote_followup: fill(book.subject.followup1, { code }),
@@ -884,9 +919,13 @@ function draftEmail(context: Record<string, unknown>, stage: string): string {
     whatsapp_short: fill(book.subject.quote, { code, company: customerCompany || companySeller }),
   };
 
+  // Explicit fallback rather than defaulting to `first_reply`. A first reply sent
+  // at the wrong moment reads as "this system isn't paying attention".
+  const resolvedStage = bodyByStage[stage] ? stage : 'whatsapp_short';
+
   return JSON.stringify({
-    subject: subjectByStage[stage] ?? subjectByStage.first_reply,
-    body: bodyByStage[stage] ?? bodyByStage.first_reply,
+    subject: subjectByStage[stage] ?? fill(book.subject.firstReply, { code }),
+    body: bodyByStage[resolvedStage] ?? bodyByStage.first_reply,
     language,
     stage,
     signature_block: signature,

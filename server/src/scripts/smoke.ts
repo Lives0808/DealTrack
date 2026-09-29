@@ -22,9 +22,9 @@ import { seedDatabase, seedDealClosure, SAMPLE_INQUIRIES, summarize } from './se
 import { addDays } from '../core/util.js';
 import { SETTING_KEYS, getAutomation, setSetting } from '../core/settings.js';
 import { ingestInbound } from '../core/ingest.js';
-import { registerAgents, runTask, wireRoutes } from '../agents/orchestrator.js';
+import { dispatch, registerAgents, runTask, wireRoutes } from '../agents/orchestrator.js';
 import { getQueue } from '../core/queue.js';
-import { getCustomer, listInquiries, getInquiry } from '../core/repos/sales.js';
+import { getCustomer, listCustomers, listInquiries, getInquiry } from '../core/repos/sales.js';
 import { listOutcomes, listQuotes, getQuote, recordOutcome } from '../core/repos/quoting.js';
 import { listFollowups, listMessages, listPlaybooks } from '../core/repos/engagement.js';
 import { listAlerts } from '../core/repos/engagement.js';
@@ -43,7 +43,7 @@ import {
 } from '../core/repos/billing.js';
 import { isReplySubject, sameConversation } from '../core/ingest.js';
 import { recordHumanEdit } from '../core/repos/engagement.js';
-import { detectLanguage } from '../core/i18n.js';
+import { detectLanguage, getPhrasebook } from '../core/i18n.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 
@@ -516,6 +516,88 @@ async function main(): Promise<void> {
   check('回款汇总能反映已收与逾期', closureCash.collected > 0 && closureCash.overdueCount > 0, `已收 ${closureCash.collected.toFixed(0)} / 逾期 ${closureCash.overdueCount} 笔`);
   await drainQueue();
 
+  console.log('\n【21】外发内容必须说人话（不只是流程跑通）');
+  // Everything above checks that the pipeline ran. These check that what comes
+  // out of it is something a customer should actually receive. The bugs they
+  // guard against were all "green tests, nonsense email".
+  const overdueMilestone = getDb().get<Record<string, unknown>>(
+    "SELECT id FROM payment_milestones WHERE status = 'overdue' LIMIT 1",
+  );
+  if (overdueMilestone) {
+    dispatch({
+      agent: 'followup',
+      taskType: 'draft_payment_reminder',
+      payload: { milestoneId: String(overdueMilestone.id) },
+      dedupeKey: `payremind:smoke:${Date.now()}`,
+      runNow: true,
+    });
+    await drainQueue();
+  }
+
+  const reminder = listMessages({ limit: 200 }).find(
+    (message) => message.createdBy === 'agent:followup' && /payment|支払|款项|Payment|الدفع/i.test(message.subject ?? ''),
+  );
+
+  if (!reminder) {
+    check('存在催款草稿', false, '未生成催款草稿');
+  } else {
+    const book = getPhrasebook(reminder.language ?? 'en');
+    const usesPaymentIntro = reminder.body.includes(phraseMarker(book.paymentDueIntro, 12));
+    const usesThanksLine = reminder.body.includes(phraseMarker(book.thanksForInquiry, 14));
+    check(
+      '催款邮件用的是催款话术，不是「感谢询盘」',
+      usesPaymentIntro && !usesThanksLine,
+      usesPaymentIntro
+        ? usesThanksLine
+          ? '同时混入了「感谢询盘」句'
+          : '使用了催款开场句'
+        : '正文里找不到催款开场句',
+    );
+    check(
+      '催款邮件带上了金额与到期日',
+      /[\d][\d,.]{3,}/.test(reminder.body),
+      (reminder.body.match(/[\d][\d,.]{3,}/) ?? [''])[0] || '未找到金额',
+    );
+    const usesPaymentCta = reminder.body.includes(phraseMarker(book.paymentReminderCta, 18));
+    const usesQuoteCta = reminder.body.includes(phraseMarker(book.ctaReply, 14));
+    check(
+      '催款邮件用的是催款 CTA（不是问数量与目的港）',
+      usesPaymentCta && !usesQuoteCta,
+      usesPaymentCta ? (usesQuoteCta ? '混入了报价 CTA' : 'CTA 正确') : 'CTA 缺失',
+    );
+  }
+
+  // "Thank you for your inquiry about {company}" must name what they asked for,
+  // not who they are. Filling it with the customer's own name produced
+  // "thank you for your inquiry about 田中 健一".
+  const japaneseCustomer = getCustomer(
+    listCustomers({ search: '田中' })[0]?.id ?? '',
+  );
+  if (japaneseCustomer) {
+    const customerDraft = listMessages({ limit: 200 }).find(
+      (message) =>
+        message.customerId === japaneseCustomer.id &&
+        (message.status === 'pending_approval' || message.status === 'sent') &&
+        !/payment|支払/i.test(message.subject ?? ''),
+    );
+    if (customerDraft) {
+      const book = getPhrasebook(customerDraft.language ?? 'en');
+      const thanksMarker = phraseMarker(book.thanksForInquiry, 14);
+      const thanksLine = customerDraft.body
+        .split('\n')
+        .find((line) => line.includes(thanksMarker)) ?? '';
+      check(
+        '「感谢询盘」句子引用的是产品，不是客户自己的名字',
+        thanksLine.length === 0 || !thanksLine.includes(japaneseCustomer.company),
+        thanksLine ? thanksLine.slice(0, 60) : '（该草稿未使用这句话）',
+      );
+    } else {
+      check('「感谢询盘」句子引用的是产品，不是客户自己的名字', true, '（无可检查的草稿）');
+    }
+  } else {
+    check('「感谢询盘」句子引用的是产品，不是客户自己的名字', true, '（无日本客户）');
+  }
+
   console.log('\n【19】收尾：队列必须干净');
   // Recording a win fans out to the proforma invoice and the customs
   // declaration, so the pipeline is genuinely still working during the earlier
@@ -556,6 +638,23 @@ async function main(): Promise<void> {
   unwire();
   getDb().close();
   process.exit(failed.length === 0 ? 0 : 1);
+}
+
+/**
+ * A reliable search marker for a phrasebook template.
+ *
+ * Templates start with a placeholder ("{company} についてお問い合わせいただき…"),
+ * so splitting on "{" and taking the head yields an empty string — and
+ * `String.includes('')` is always true, which made the first version of these
+ * assertions pass for the wrong reason. Take the longest literal run instead.
+ */
+function phraseMarker(template: string, length = 16): string {
+  const parts = template
+    .split(/\{\w+\}/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 6);
+  const longest = parts.sort((a, b) => b.length - a.length)[0];
+  return (longest ?? template).slice(0, length);
 }
 
 function createLanguageCoverage(created: Array<{ language: string }>): boolean {

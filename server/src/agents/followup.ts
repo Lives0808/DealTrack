@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { addDays, addHours, daysBetween, nowIso, truncate } from '../core/util.js';
 import { EVENTS } from '../core/events.js';
 import { getAutomation, getCompany, getSalesIdentity } from '../core/settings.js';
-import { fill, getPhrasebook } from '../core/i18n.js';
+import { fill, formatDate, formatMoney, getPhrasebook, milestoneLabel } from '../core/i18n.js';
 import {
   createMessage,
   createAlert,
@@ -590,8 +590,14 @@ async function draftPaymentReminder(payload: Record<string, unknown>, ctx: Agent
       senderName: sales.senderName,
       senderRole: sales.senderRole,
       code: pi?.piNo ?? '',
+      // The facts a dunning note must get right. Getting them wrong damages the
+      // relationship instead of collecting the money.
+      piNo: pi?.piNo ?? '',
+      milestoneLabel: isDeposit ? 'deposit' : 'balance',
       currency,
       total: amount,
+      dueDate: dueAt ?? '',
+      daysLate,
       leadTimeDays: 0,
       paymentTerms: pi?.paymentTerms ?? company.paymentTerms,
       validUntil: dueAt?.slice(0, 10) ?? '',
@@ -602,10 +608,17 @@ async function draftPaymentReminder(payload: Record<string, unknown>, ctx: Agent
       body: [
         customer.contactName ? fill(book.greeting, { name: customer.contactName }) : book.greetingGeneric,
         '',
-        `${pi?.piNo ? `PI ${pi.piNo}` : 'PI'} · ${isDeposit ? 'deposit' : 'balance'}: ${currency} ${amount.toFixed(2)}`,
-        dueAt ? `Original due date: ${dueAt.slice(0, 10)}` : '',
+        book.paymentDueIntro,
         '',
-        book.ctaReply,
+        `• ${milestoneLabel(isDeposit ? 'deposit' : 'balance', customer.language)}: ${formatMoney(amount, currency, customer.language)}`,
+        dueAt ? `• ${formatDate(dueAt, customer.language)}` : '',
+        daysLate > 0 ? fill(book.paymentLateNote, { days: daysLate }) : '',
+        pi ? `• ${pi.piNo}` : '',
+        '',
+        // Deliberately the payment CTA, not the quotation CTA. Asking a buyer to
+        // "confirm the quantity and destination port" in a dunning note is how
+        // you lose the order while chasing the money.
+        book.paymentReminderCta,
         '',
         [book.closing, sales.senderName, sales.senderRole, company.name].filter(Boolean).join('\n'),
       ]
