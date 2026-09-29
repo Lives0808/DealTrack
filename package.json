@@ -1,0 +1,37 @@
+{
+  "name": "dealtrack",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DealTrack — 跨境小卖家的 AI 数字外贸团队：询盘 → 报价 → 跟进，30分钟/封变3分钟/封，不漏跟",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace=server & npm run dev --workspace=web",
+    "dev:server": "npm run dev --workspace=server",
+    "dev:web": "npm run dev --workspace=web",
+    "build": "npm run build --workspace=server && npm run build --workspace=web",
+    "start": "npm run start --workspace=server",
+    "seed": "npm run seed --workspace=server",
+    "smoke": "npm run smoke --workspace=server",
+    "typecheck": "npm run typecheck --workspace=server && npm run typecheck --workspace=web",
+    "android:apk": "cd android && ./gradlew assembleRelease",
+    "screenshots": "node scripts/screenshot.mjs",
+    "package": "bash scripts/package.sh",
+    "seed:samples": "npm run seed --workspace=server -- --with-samples"
+  },
+  "keywords": [
+    "crm",
+    "multi-agent",
+    "llm",
+    "export",
+    "cross-border",
+    "quotation",
+    "email-automation"
+  ],
+  "license": "MIT"
+}

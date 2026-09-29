@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Compose owns all in-app styling; this theme only covers the window before
+      the first frame is drawn, so there is no white flash on cold start.
+    -->
+    <style name="Theme.DealTrack" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/dt_primary</item>
+        <item name="android:navigationBarColor">@color/dt_surface</item>
+        <item name="android:windowBackground">@color/dt_background</item>
+    </style>
+</resources>

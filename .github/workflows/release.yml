@@ -1,0 +1,177 @@
+name: Release
+
+# Builds the server bundle, the web console and the Android APK, then publishes
+# them as a GitHub Release. Runs on a tag push (`v0.1.0`) and can be triggered
+# manually for a dry run.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（例如 v0.1.0）'
+        required: true
+        default: 'v0.1.0'
+      prerelease:
+        description: '标记为预发布'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  build-server:
+    name: 构建后端与前端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 端到端冒烟测试（49 项断言）
+        run: npm run smoke --workspace=server
+
+      - name: 构建
+        run: npm run build
+
+      - name: 打包发行包
+        run: |
+          mkdir -p release
+          tar czf release/dealtrack-server-${{ github.ref_name }}.tgz \
+            --exclude='./data' \
+            --exclude='./node_modules' \
+            --exclude='./android' \
+            --exclude='./release' \
+            --exclude='./.git' \
+            .
+          cd release && shasum -a 256 *.tgz > SHA256SUMS.txt || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-bundle
+          path: release/
+
+  # ---------------------------------------------------------------------------
+  build-android:
+    name: 构建安卓 APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 安装 SDK 平台
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" || true
+
+      - name: 构建 release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+
+      - name: 重命名产物
+        run: |
+          mkdir -p release
+          cp android/app/build/outputs/apk/release/app-release.apk \
+             "release/dealtrack-android-${{ github.ref_name }}.apk"
+          cd release && shasum -a 256 *.apk > SHA256SUMS-apk.txt || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: release/
+
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 发布 GitHub Release
+    needs: [build-server, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 整理产物
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.tgz' -o -name '*.apk' -o -name 'SHA256*' \) -exec cp {} dist/ \;
+          ls -la dist/
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: DealTrack ${{ github.event.inputs.tag || github.ref_name }}
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          generate_release_notes: true
+          body: |
+            ## DealTrack · 数字外贸团队
+
+            把「**30 分钟/封**」变成「**3 分钟/封**」，并且**不漏跟**。
+
+            跨境小卖家的询盘 → 报价 → 跟进一体化工作台。
+            多智能体（销售 / 跟单 / 报关）协作 + 事件驱动自动化。
+
+            ### 下载
+
+            | 文件 | 说明 |
+            |---|---|
+            | `dealtrack-server-*.tgz` | 服务端 + Web 控制台完整源码 |
+            | `dealtrack-android-*.apk` | 安卓原生 App（Kotlin + Compose） |
+            | `SHA256SUMS*.txt` | 校验和 |
+
+            ### 三步跑起来
+
+            ```bash
+            tar xzf dealtrack-server-*.tgz && cd DealTrack
+            npm install && npm run build
+            npm run seed --workspace=server -- --with-samples
+            npm start                       # → http://localhost:8787
+            ```
+
+            **不需要任何 API Key。** 默认走内置离线引擎，完整跑通
+            询盘解析 → 产品匹配 → FOB/CIF 定价 → 多语言起草 → 跟进排程。
+
+            想接真实模型：设置 → AI 模型 → 填 Key（BYOK，支持 OpenAI / DeepSeek / Ollama / 任意兼容端点）。
+
+            ### 验证它真的能跑
+
+            ```bash
+            npm run smoke --workspace=server   # 49 项端到端断言
+            ```
+
+            ### 安卓端
+
+            手机与电脑连同一 Wi-Fi，在 App 设置里填 `http://<电脑局域网IP>:8787` 与 API Token。
+
+            > APK 使用 Android 调试签名，方便直接安装体验。
+            > 正式分发请自行生成签名密钥并配置 `android/keystore.properties`。
+
+            ### 文档
+
+            - [架构](docs/ARCHITECTURE.md) · [API](docs/API.md) · [部署](docs/DEPLOYMENT.md) · [路线图](docs/ROADMAP.md)
+        files: dist/*

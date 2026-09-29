@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+web/dist/
+server/dist/
+*.tsbuildinfo
+
+# Runtime data (local-first: the SQLite DB and uploaded files never leave the machine)
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+server/data/
+storage/
+
+# Secrets — never commit BYOK keys or credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+!android/keystore.properties.example
+
+# Android
+android/.gradle/
+android/local.properties
+android/app/release/
+android/build/
+android/app/build/
+android/app/src/main/assets/www/
+*.apk.idsig
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+npm-debug.log*
+coverage/
+
+# Release artifacts
+release/
+artifacts/

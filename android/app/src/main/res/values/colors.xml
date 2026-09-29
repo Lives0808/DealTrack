@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="dt_primary">#0B5CAD</color>
+    <color name="dt_primary_dark">#084A8C</color>
+    <color name="dt_surface">#FFFFFF</color>
+    <color name="dt_background">#F5F7FA</color>
+    <color name="dt_on_primary">#FFFFFF</color>
+    <color name="dt_black">#000000</color>
+</resources>

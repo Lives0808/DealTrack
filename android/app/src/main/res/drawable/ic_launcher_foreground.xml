@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launcher foreground: a lightning bolt inside a rising arrow — "faster replies,
+  closed deals". Drawn inside the 72dp safe zone of the 108dp adaptive canvas.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Rising arrow / chart line -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.28"
+        android:pathData="M26,74 L42,60 L54,68 L82,40 L82,52 L54,80 L42,72 L26,86 Z" />
+
+    <!-- Lightning bolt -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M60,24 L38,60 L52,60 L46,86 L70,48 L55,48 L60,24 Z" />
+</vector>
