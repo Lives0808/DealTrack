@@ -565,6 +565,51 @@ async function main(): Promise<void> {
       usesPaymentCta && !usesQuoteCta,
       usesPaymentCta ? (usesQuoteCta ? '混入了报价 CTA' : 'CTA 正确') : 'CTA 缺失',
     );
+
+    // A draft nobody can see is a draft nobody sends. The 跟进看板 lists
+    // `followups`, so a reminder that produced only a `message` was invisible in
+    // both the web console and the app.
+    const reminderFollowup = listFollowups({ limit: 300 }).find((entry) => entry.id === reminder.followupId);
+    check(
+      '催款草稿出现在跟进看板里（可见才有人发）',
+      Boolean(reminderFollowup) && reminderFollowup!.intent === 'payment_reminder',
+      reminderFollowup ? `${reminderFollowup.intent} · ${reminderFollowup.status}` : '未关联跟进记录',
+    );
+
+    // Tapping "催款" twice must not queue two identical dunning notes.
+    const beforeManual = listMessages({ limit: 300 }).filter((m) => m.followupId === reminder.followupId).length;
+    dispatch({
+      agent: 'followup',
+      taskType: 'draft_payment_reminder',
+      payload: { milestoneId: String(overdueMilestone!.id) },
+      dedupeKey: `payremind:dup-check:${Date.now()}`,
+      runNow: true,
+    });
+    await drainQueue();
+    const afterManual = listMessages({ limit: 300 }).filter((m) => m.followupId === reminder.followupId).length;
+    check(
+      '重复点「催款」不会生成第二封草稿',
+      afterManual === beforeManual,
+      `${beforeManual} → ${afterManual} 封`,
+    );
+
+    // And the two sweeps must not both try to write it.
+    dispatch({
+      agent: 'followup',
+      taskType: 'draft_followup',
+      payload: { followupId: reminder.followupId },
+      dedupeKey: `draft_followup:check:${Date.now()}`,
+      runNow: true,
+    });
+    await drainQueue();
+    const afterRedraft = listMessages({ limit: 300 }).filter(
+      (message) => message.followupId === reminder.followupId,
+    );
+    check(
+      '回款扫描与跟单扫描不会重复起草同一笔催款',
+      afterRedraft.length === 1,
+      `${afterRedraft.length} 封`,
+    );
   }
 
   // "Thank you for your inquiry about {company}" must name what they asked for,

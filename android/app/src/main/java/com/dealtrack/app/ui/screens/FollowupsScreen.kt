@@ -109,8 +109,11 @@ fun FollowupsScreen(
 
                 SectionCard {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        // Payment reminders carry a synthetic high sequence number
+                        // so they sort last; showing "第 90 次跟进" would be noise.
                         Text(
-                            "第 ${followup.sequenceNo} 次跟进",
+                            if (followup.intent == "payment_reminder") "回款催收"
+                            else "第 ${followup.sequenceNo} 次跟进",
                             style = MaterialTheme.typography.titleSmall,
                             color = if (overdue) Color(0xFFD02F2F) else MaterialTheme.colorScheme.onSurface,
                         )

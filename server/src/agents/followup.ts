@@ -192,6 +192,11 @@ async function sweepDue(ctx: AgentContext): Promise<AgentResult> {
   let skipped = 0;
 
   for (const followup of due) {
+    // Payment reminders are owned by `sweep_payments`, which knows the amount and
+    // the due date. Re-drafting them here would emit a quotation-style nudge
+    // about a debt.
+    if (followup.intent === 'payment_reminder') continue;
+
     // Skip if the customer already replied — a reply marks the followup 'replied'.
     const inquiry = followup.inquiryId ? getInquiry(followup.inquiryId, false) : null;
     if (inquiry && ['won', 'lost', 'archived'].includes(inquiry.status)) {
@@ -233,6 +238,17 @@ async function draftFollowup(payload: Record<string, unknown>, ctx: AgentContext
   if (!followup) return { status: 'skipped', summary: '跟进记录不存在' };
   if (!['scheduled', 'pending_approval'].includes(followup.status)) {
     return { status: 'skipped', summary: `跟进状态为 ${followup.status}，无需起草` };
+  }
+  // Already drafted — the message exists and is waiting for a human.
+  if (followup.intent === 'payment_reminder') {
+    return { status: 'skipped', summary: '催款内容由回款扫描生成，此处不重复起草' };
+  }
+  const existingDraft = ctx.db.get<Record<string, unknown>>(
+    "SELECT id FROM outbound_messages WHERE followup_id = ? AND status IN ('draft','pending_approval') LIMIT 1",
+    followup.id,
+  );
+  if (existingDraft) {
+    return { status: 'skipped', summary: '该跟进已有待确认草稿' };
   }
 
   const customer = getCustomer(followup.customerId);
@@ -549,6 +565,26 @@ async function draftPaymentReminder(payload: Record<string, unknown>, ctx: Agent
 
   const pi = milestone.pi_id ? getPi(String(milestone.pi_id)) : null;
   const company = getCompany();
+
+  // One pending reminder per quote at a time.
+  //
+  // `sweep_payments` deduplicates by remind-count, but the manual "催款" button
+  // used a timestamp in its key — so tapping it twice produced two identical
+  // drafts in the approval queue. Whoever reviews them would send the customer
+  // the same dunning note twice, which is exactly the impression to avoid.
+  const alreadyPending = ctx.db.get<Record<string, unknown>>(
+    `SELECT id FROM followups
+      WHERE quote_id = ? AND intent = 'payment_reminder' AND status = 'pending_approval'
+      LIMIT 1`,
+    String(milestone.quote_id ?? ''),
+  );
+  if (alreadyPending) {
+    return {
+      status: 'skipped',
+      summary: '该笔欠款已有待确认的催款草稿，不重复起草',
+      data: { followupId: String(alreadyPending.id) },
+    };
+  }
   const sales = getSalesIdentity();
   const book = getPhrasebook(customer.language);
   const isDeposit = String(milestone.label) === 'deposit';
@@ -629,11 +665,32 @@ async function draftPaymentReminder(payload: Record<string, unknown>, ctx: Agent
   });
 
   const channel = preferredChannel(customer);
+
+  // Record the reminder as a follow-up too.
+  //
+  // It used to produce only a `message`, and the 跟进看板 lists `followups` — so
+  // the draft existed, was correct, and was invisible in both the web console and
+  // the app. A reminder nobody sees is a reminder nobody sends.
+  const reminderRecord = createFollowup({
+    inquiryId: pi?.inquiryId ?? null,
+    quoteId: String(milestone.quote_id ?? '') || null,
+    customerId: customer.id,
+    sequenceNo: 90 + Number(milestone.remind_count ?? 0),
+    channel,
+    dueAt: nowIso(),
+    status: 'pending_approval',
+    reason: `回款逾期催收：${isDeposit ? '定金' : '尾款'} ${currency} ${amount.toFixed(2)}`,
+    intent: 'payment_reminder',
+    language: customer.language,
+    assignedTo: null,
+  });
+
   const message = createMessage({
     channel,
     inquiryId: pi?.inquiryId ?? null,
     quoteId: String(milestone.quote_id ?? '') || null,
     customerId: customer.id,
+    followupId: reminderRecord.id,
     toAddr: channel === 'whatsapp' ? customer.whatsapp ?? customer.phone ?? '' : customer.email ?? '',
     fromAddr: sales.senderEmail,
     subject: draft.subject || fill(book.subject.payment, { code: pi?.piNo ?? '' }),
@@ -643,6 +700,7 @@ async function draftPaymentReminder(payload: Record<string, unknown>, ctx: Agent
     createdBy: 'agent:followup',
   });
 
+  updateFollowup(reminderRecord.id, { subject: message.subject, body: message.body });
   markMilestoneReminded(milestoneId);
 
   ctx.emit({
@@ -652,6 +710,7 @@ async function draftPaymentReminder(payload: Record<string, unknown>, ctx: Agent
     subject: `已起草催款：${customer.company} ${currency} ${amount.toFixed(2)}`,
     payload: {
       messageId: message.id,
+      followupId: reminderRecord.id,
       milestoneId,
       piId: pi?.id ?? null,
       customerId: customer.id,
@@ -664,7 +723,7 @@ async function draftPaymentReminder(payload: Record<string, unknown>, ctx: Agent
   return {
     status: 'waiting_approval',
     summary: `催款草稿就绪：${customer.company} ${currency} ${amount.toFixed(2)}`,
-    data: { messageId: message.id, milestoneId, daysLate },
+    data: { messageId: message.id, followupId: reminderRecord.id, milestoneId, daysLate },
   };
 }
 

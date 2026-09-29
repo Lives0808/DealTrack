@@ -228,7 +228,8 @@ export function registerBillingRoutes(app: FastifyInstance): void {
       agent: 'followup',
       taskType: 'draft_payment_reminder',
       payload: { milestoneId: id },
-      dedupeKey: `payremind:${id}:manual:${Date.now()}`,
+      // Stable key: a queued reminder for this milestone is the same work.
+      dedupeKey: `payremind:${id}`,
       runNow: true,
       priority: 5,
     });

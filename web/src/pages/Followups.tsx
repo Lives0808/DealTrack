@@ -170,7 +170,9 @@ export function FollowupsPage() {
               render: (_, record) => (
                 <div>
                   <Space size={6}>
-                    <Tag color="blue">第 {record.sequenceNo} 次</Tag>
+                    <Tag color={record.intent === 'payment_reminder' ? 'orange' : 'blue'}>
+                      {record.intent === 'payment_reminder' ? '回款催收' : `第 ${record.sequenceNo} 次`}
+                    </Tag>
                     {record.subject ? <Text style={{ fontSize: 12.5 }}>{record.subject}</Text> : <Text type="secondary" style={{ fontSize: 12 }}>{record.reason ?? '—'}</Text>}
                   </Space>
                   {record.body && (
