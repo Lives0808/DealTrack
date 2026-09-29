@@ -31,10 +31,11 @@ const PAGES = [
   { name: '02-inbox', path: '/inbox', wait: 3500, title: '询盘箱' },
   { name: '03-quotes', path: '/quotes', wait: 3500, title: '报价单' },
   { name: '04-followups', path: '/followups', wait: 3500, title: '跟进看板' },
-  { name: '05-products', path: '/products', wait: 3500, title: '产品库' },
-  { name: '06-playbooks', path: '/playbooks', wait: 3500, title: '话术库' },
-  { name: '07-agents', path: '/agents', wait: 4500, title: '智能体' },
-  { name: '08-settings', path: '/settings', wait: 3500, title: '设置' },
+  { name: '05-payments', path: '/payments', wait: 3500, title: '回款看板' },
+  { name: '06-products', path: '/products', wait: 3500, title: '产品库' },
+  { name: '07-playbooks', path: '/playbooks', wait: 3500, title: '话术库' },
+  { name: '08-agents', path: '/agents', wait: 4500, title: '智能体' },
+  { name: '09-settings', path: '/settings', wait: 3500, title: '设置' },
 ];
 
 function chromePath() {

@@ -59,6 +59,7 @@ import {
   relative,
 } from '../ui';
 import { PageHeader } from '../components/AppLayout';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 
 interface Timeseries {
   inquiries: Array<{ day: string; n: number }>;
@@ -251,6 +252,7 @@ export function DashboardPage() {
         </Col>
       </Row>
 
+      <ErrorBoundary label="趋势与漏斗">
       <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
         <Col xs={24} lg={16}>
           <Card
@@ -307,7 +309,9 @@ export function DashboardPage() {
           </Card>
         </Col>
       </Row>
+      </ErrorBoundary>
 
+      <ErrorBoundary label="团队与风险">
       <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
         <Col xs={24} lg={8}>
           <Card size="small" title="AI 数字外贸团队" loading={!overview}>
@@ -435,6 +439,9 @@ export function DashboardPage() {
         </Col>
       </Row>
 
+      </ErrorBoundary>
+
+      <ErrorBoundary label="事件流与分析">
       <Row gutter={[14, 14]} style={{ marginTop: 14 }}>
         <Col xs={24} lg={12}>
           <Card
@@ -503,6 +510,8 @@ export function DashboardPage() {
           </Card>
         </Col>
       </Row>
+
+      </ErrorBoundary>
 
       <Card size="small" title="成本与合规" style={{ marginTop: 14 }} loading={!overview}>
         <Row gutter={[16, 16]}>

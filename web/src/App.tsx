@@ -3,6 +3,7 @@ import { DashboardPage } from './pages/Dashboard';
 import { InboxPage } from './pages/Inbox';
 import { QuotesPage } from './pages/Quotes';
 import { FollowupsPage } from './pages/Followups';
+import { PaymentsPage } from './pages/Payments';
 import { CustomersPage } from './pages/Customers';
 import { ProductsPage } from './pages/Products';
 import { PlaybooksPage } from './pages/Playbooks';
@@ -18,6 +19,7 @@ export function AppRoutes() {
       <Route path="/quotes" element={<QuotesPage />} />
       <Route path="/quotes/:id" element={<QuotesPage />} />
       <Route path="/followups" element={<FollowupsPage />} />
+      <Route path="/payments" element={<PaymentsPage />} />
       <Route path="/customers" element={<CustomersPage />} />
       <Route path="/customers/:id" element={<CustomersPage />} />
       <Route path="/products" element={<ProductsPage />} />

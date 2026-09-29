@@ -279,6 +279,11 @@ export interface OutboundMessage {
   sentAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** The draft as the agent wrote it, captured the first time a human edits. */
+  originalSubject: string | null;
+  originalBody: string | null;
+  editedBy: string | null;
+  editedAt: string | null;
 }
 
 export function mapMessage(row: Row): OutboundMessage {
@@ -306,7 +311,72 @@ export function mapMessage(row: Row): OutboundMessage {
     sentAt: (row.sent_at as string | null) ?? null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    originalSubject: (row.original_subject as string | null) ?? null,
+    originalBody: (row.original_body as string | null) ?? null,
+    editedBy: (row.edited_by as string | null) ?? null,
+    editedAt: (row.edited_at as string | null) ?? null,
   };
+}
+
+/**
+ * Record that a human rewrote an agent draft.
+ *
+ * This is the only honest signal for "did the AI's wording actually get used?".
+ * Without it the playbook ranking is measuring usage, not acceptance — and a
+ * template everyone rewrites would look like a top performer. The original is
+ * kept exactly once, so later edits don't overwrite the agent's first attempt.
+ */
+export function recordHumanEdit(
+  id: string,
+  edit: { subject?: string | null; body?: string | null; editor: string },
+): { changed: boolean; revertToOriginal: { subject: string | null; body: string | null } | null } {
+  const db = getDb();
+  const message = getMessage(id);
+  if (!message) return { changed: false, revertToOriginal: null };
+
+  const originalSubject = message.originalSubject ?? message.subject;
+  const originalBody = message.originalBody ?? message.body;
+  const subjectChanged = edit.subject !== undefined && edit.subject !== message.subject;
+  const bodyChanged = edit.body !== undefined && edit.body !== message.body;
+  if (!subjectChanged && !bodyChanged) return { changed: false, revertToOriginal: null };
+
+  updateMessage(id, {
+    ...(edit.subject !== undefined ? { subject: edit.subject } : {}),
+    ...(edit.body !== undefined ? { body: edit.body } : {}),
+    original_subject: originalSubject,
+    original_body: originalBody,
+    edited_by: edit.editor,
+    edited_at: nowIso(),
+  });
+
+  return {
+    changed: true,
+    revertToOriginal: { subject: originalSubject, body: originalBody },
+  };
+}
+
+/** How much of the agent's output survives human review for a given stage. */
+export function rewriteRateByStage(sinceIso: string): Array<{ stage: string; sent: number; rewritten: number; rate: number }> {
+  const rows = getDb().all<Row>(
+    `SELECT COALESCE(f.intent, 'quote_cover') AS stage,
+            COUNT(*) AS sent,
+            SUM(CASE WHEN m.original_body IS NOT NULL THEN 1 ELSE 0 END) AS rewritten
+       FROM outbound_messages m
+       LEFT JOIN followups f ON f.id = m.followup_id
+      WHERE m.status = 'sent' AND m.created_at >= ?
+      GROUP BY stage`,
+    sinceIso,
+  );
+  return rows.map((row) => {
+    const sent = Number(row.sent ?? 0);
+    const rewritten = Number(row.rewritten ?? 0);
+    return {
+      stage: String(row.stage),
+      sent,
+      rewritten,
+      rate: sent > 0 ? Number((rewritten / sent).toFixed(3)) : 0,
+    };
+  });
 }
 
 export function createMessage(input: {
@@ -426,6 +496,8 @@ export interface Playbook {
   usageCount: number;
   replyCount: number;
   winCount: number;
+  /** Times a human rewrote the draft this template produced. */
+  editCount: number;
   builtin: boolean;
   active: boolean;
   createdAt: string;
@@ -447,6 +519,7 @@ export function mapPlaybook(row: Row): Playbook {
     usageCount: Number(row.usage_count ?? 0),
     replyCount: Number(row.reply_count ?? 0),
     winCount: Number(row.win_count ?? 0),
+    editCount: Number(row.edit_count ?? 0),
     builtin: toBool(row.builtin),
     active: toBool(row.active),
     createdAt: String(row.created_at),
@@ -491,8 +564,14 @@ export function pickPlaybook(stage: string, language: string, channel = 'email')
   if (candidates.length === 0) return listPlaybooks({ stage, channel: 'email' })[0] ?? null;
   return candidates.sort((a, b) => {
     const langScore = (book: Playbook) => (book.language === base ? 1 : 0);
+    // `editCount` is a negative signal: a template the team rewrites before
+    // sending is not actually doing its job, however often it is chosen.
     const score = (book: Playbook) =>
-      langScore(book) * 1000 + book.winCount * 10 + book.replyCount * 2 + book.usageCount * 0.1;
+      langScore(book) * 1000 +
+      book.winCount * 10 +
+      book.replyCount * 2 +
+      book.usageCount * 0.1 -
+      book.editCount * 3;
     return score(b) - score(a);
   })[0]!;
 }
@@ -538,7 +617,10 @@ export function upsertPlaybook(input: Partial<Playbook> & { name: string; bodyTp
   return getPlaybook(id)!;
 }
 
-export function bumpPlaybook(id: string, field: 'usage_count' | 'reply_count' | 'win_count'): void {
+export function bumpPlaybook(
+  id: string,
+  field: 'usage_count' | 'reply_count' | 'win_count' | 'edit_count',
+): void {
   getDb().run(`UPDATE playbooks SET ${field} = ${field} + 1, updated_at = ? WHERE id = ?`, nowIso(), id);
 }
 

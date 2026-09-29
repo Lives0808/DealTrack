@@ -28,6 +28,7 @@ import {
 } from '../core/repos/quoting.js';
 import {
   bumpPlaybook,
+  createAlert,
   cancelOpenFollowups,
   createMessage,
   getFollowup,
@@ -40,6 +41,8 @@ import {
 } from '../core/repos/engagement.js';
 import { deliver } from '../integrations/messaging.js';
 import { generateQuotePdf } from '../docgen/quote.js';
+import { generatePiPdf } from '../docgen/proforma.js';
+import { createProformaInvoice, getPiByQuote, updatePi } from '../core/repos/billing.js';
 import type { AgentContext, AgentDefinition, AgentResult } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -103,7 +106,7 @@ export const salesAgent: AgentDefinition = {
   name: 'sales',
   label: '销售智能体',
   description: '解析询盘、匹配产品库、计算价格、起草多语言报价邮件、建档',
-  taskTypes: ['parse_inquiry', 'draft_quote_and_reply', 'send_message', 'classify_inbound', 'analyze_loss', 'reprice_quote'],
+  taskTypes: ['parse_inquiry', 'draft_quote_and_reply', 'send_message', 'classify_inbound', 'analyze_loss', 'reprice_quote', 'create_proforma'],
 
   async handle(task, ctx) {
     switch (task.taskType) {
@@ -119,6 +122,8 @@ export const salesAgent: AgentDefinition = {
         return analyzeLoss(task.payload, ctx);
       case 'reprice_quote':
         return repriceQuote(task.payload, ctx);
+      case 'create_proforma':
+        return createProforma(task.payload, ctx);
       default:
         return { status: 'skipped', summary: `未知任务类型 ${task.taskType}` };
     }
@@ -420,9 +425,19 @@ async function draftQuoteAndReply(payload: Record<string, unknown>, ctx: AgentCo
   const automation = getAutomation();
   const items = listInquiryItems(inquiry.id);
 
-  const costable = items
-    .map((item) => ({ item, product: item.productId ? getProduct(item.productId) : null }))
-    .filter((entry): entry is { item: typeof items[number]; product: Product } => Boolean(entry.product));
+  const candidates = items.map((item) => ({ item, product: item.productId ? getProduct(item.productId) : null }));
+  const costable = candidates.filter((entry): entry is { item: typeof items[number]; product: Product } =>
+    Boolean(entry.product),
+  );
+  // Lines the agent could not match to the product library.
+  //
+  // v1 silently dropped these, so a customer asking for three items could get a
+  // quotation for two and nobody would notice until the order came up short.
+  // They now become an explicit "to be confirmed" block in the reply, an alert,
+  // and a note on the quote.
+  const unmatched = candidates
+    .filter((entry) => !entry.product)
+    .map((entry) => entry.item.rawText ?? entry.item.description ?? '未识别行');
 
   if (costable.length === 0) {
     // Nothing to price. Draft a clarifying reply instead of guessing at numbers.
@@ -530,6 +545,10 @@ async function draftQuoteAndReply(payload: Record<string, unknown>, ctx: AgentCo
   );
 
   const validUntilDays = 30;
+  const partialNote =
+    unmatched.length > 0
+      ? `以下行项目未能匹配产品库，未包含在本报价中，需人工确认：${unmatched.join('；')}`
+      : '';
   const quote = createQuote({
     inquiryId: inquiry.id,
     customerId: customer.id,
@@ -543,7 +562,7 @@ async function draftQuoteAndReply(payload: Record<string, unknown>, ctx: AgentCo
     language: customer.language,
     createdBy: 'agent:sales',
     notes: freight ? `${freight.note}（${freight.mode}）` : null,
-    internalNotes: priced.warnings.length ? priced.warnings.join('\n') : null,
+    internalNotes: [partialNote, ...priced.warnings].filter(Boolean).join('\n') || null,
     status: 'draft',
     totals: {
       subtotal: priced.subtotal,
@@ -603,6 +622,31 @@ async function draftQuoteAndReply(payload: Record<string, unknown>, ctx: AgentCo
     },
   });
 
+  if (unmatched.length > 0) {
+    ctx.emit({
+      type: EVENTS.QUOTE_PARTIAL_MATCH,
+      entityType: 'quote',
+      entityId: quote.id,
+      subject: `${quote.quoteNo} 有 ${unmatched.length} 行未匹配产品库，未计入报价`,
+      payload: {
+        quoteId: quote.id,
+        inquiryId: inquiry.id,
+        unmatchedLines: unmatched,
+        pricedLines: priced.lines.length,
+      },
+    });
+
+    createAlert({
+      type: 'quote.partial_match',
+      severity: 'warning',
+      title: `报价不完整：${quote.quoteNo}`,
+      body: `客户询盘中有 ${unmatched.length} 行未能匹配产品库，本报价未包含：${unmatched.join('、')}。请补齐产品库或人工补充报价后再发送。`,
+      entityType: 'quote',
+      entityId: quote.id,
+    });
+
+  }
+
   // ---- Multilingual reply draft (话术库 + LLM) ---------------------------
   const reply = await composeReply({
     ctx,
@@ -612,6 +656,7 @@ async function draftQuoteAndReply(payload: Record<string, unknown>, ctx: AgentCo
     pricedLines: priced.lines,
     stage: 'quote_cover',
     extra: { freightNote: freight?.note ?? null, validUntilDays },
+    unmatchedLines: unmatched,
   });
 
   ctx.emit({
@@ -628,7 +673,14 @@ async function draftQuoteAndReply(payload: Record<string, unknown>, ctx: AgentCo
     },
   });
 
-  const autoApproved = automation.autoSend;
+  // A partial quote must never leave without a human looking at it, even in a
+  // shop that has turned auto-send on. Losing a line item is worse than losing a
+  // minute.
+  const autoApproved = automation.autoSend && unmatched.length === 0;
+  if (unmatched.length > 0) {
+    updateQuote(quote.id, { status: 'pending_approval' });
+  }
+
   return {
     status: autoApproved ? 'succeeded' : 'waiting_approval',
     summary: `已报价 ${quote.quoteNo}（${quote.currency} ${quote.total.toFixed(2)}，毛利 ${((quote.marginPct ?? 0) * 100).toFixed(1)}%），邮件草稿待确认`,
@@ -652,6 +704,8 @@ interface ComposeInput {
   pricedLines: PricedLine[];
   stage: string;
   extra?: Record<string, unknown>;
+  /** Inquiry lines with no product-library match, surfaced to the customer. */
+  unmatchedLines?: string[];
 }
 
 /**
@@ -669,6 +723,7 @@ export async function composeReply(input: ComposeInput): Promise<{ id: string; c
   const book = getPhrasebook(customer.language);
   const channel = inquiry.channel === 'whatsapp' ? 'whatsapp' : 'email';
 
+  const unmatchedLines = input.unmatchedLines ?? [];
   const playbook = pickPlaybook(stage, customer.language, channel === 'whatsapp' ? 'whatsapp' : 'email');
   const vars = {
     code: quote.quoteNo || inquiry.code,
@@ -728,6 +783,9 @@ export async function composeReply(input: ComposeInput): Promise<{ id: string; c
         null,
         2,
       ),
+      unmatchedLines.length > 0
+        ? `\nIMPORTANT: these requested items could NOT be matched to our catalogue and are deliberately NOT priced. Ask the customer to confirm them; do not invent prices for them:\n${unmatchedLines.map((line) => `- ${line}`).join('\n')}`
+        : '',
       playbookBody ? `\nHouse style reference (话术库「${playbook?.name}」)：\n${playbookBody}` : '',
     ].join('\n'),
     context: {
@@ -748,6 +806,7 @@ export async function composeReply(input: ComposeInput): Promise<{ id: string; c
       validUntil: quote.validUntil ? new Date(quote.validUntil).toISOString().slice(0, 10) : '30 days',
       marketCount: company.marketCount,
       missingInfo: inquiry.missingInfo,
+      unmatchedLines,
       playbookBody,
       channel,
       lines: pricedLines.map((line) => ({
@@ -775,6 +834,9 @@ export async function composeReply(input: ComposeInput): Promise<{ id: string; c
             .join('\n'),
           '',
           `${quote.incoterm} ${quote.incotermPlace} · ${quote.paymentTerms ?? company.paymentTerms} · ${fill(book.leadTimeNote, { days: quote.leadTimeDays ?? 15 })}`,
+          unmatchedLines.length > 0
+            ? `${book.missingInfoIntro}\n${unmatchedLines.map((line) => `  • ${line}`).join('\n')}`
+            : '',
           book.ctaReply,
           '',
           [book.closing, sales.senderName, sales.senderRole, company.name].filter(Boolean).join('\n'),
@@ -1003,13 +1065,7 @@ async function classifyInbound(payload: Record<string, unknown>, ctx: AgentConte
       if (latestQuote) {
         recordOutcome({ quoteId: latestQuote.id, result: 'won', decidedBy: 'agent:sales', reasonNote: '客户邮件确认下单' });
         updateInquiry(inquiry.id, { status: 'won', wonAt: nowIso() });
-        ctx.emit({
-          type: EVENTS.QUOTE_ACCEPTED,
-          entityType: 'quote',
-          entityId: latestQuote.id,
-          subject: `成交！${latestQuote.quoteNo} 客户确认下单`,
-          payload: { quoteId: latestQuote.id, inquiryId: inquiry.id, total: latestQuote.total, currency: latestQuote.currency },
-        });
+        // `recordOutcome` emits `quote.accepted`; nothing to do here.
       }
       break;
     }
@@ -1131,6 +1187,69 @@ async function analyzeLoss(payload: Record<string, unknown>, ctx: AgentContext):
     fallback: () => ({ reason_code: 'other', confidence: 0.3 }),
   });
   return { status: 'succeeded', summary: `丢单原因判定为 ${data.reason_code}`, data: { quoteId, ...data } };
+}
+
+/**
+ * Turn a won quote into a proforma invoice plus its payment milestones.
+ *
+ * This is the step v1 was missing: winning a deal only flipped a status, leaving
+ * the operator to build the PI by hand in Word — which gave back most of the
+ * time the rest of the pipeline had saved.
+ */
+async function createProforma(payload: Record<string, unknown>, ctx: AgentContext): Promise<AgentResult> {
+  const quoteId = String(payload.quoteId ?? '');
+  const quote = getQuote(quoteId);
+  if (!quote) return { status: 'skipped', summary: `报价单 ${quoteId} 不存在` };
+
+  const existing = getPiByQuote(quote.id);
+  if (existing) return { status: 'skipped', summary: `已有形式发票 ${existing.piNo}` };
+
+  const company = getCompany();
+  const pi = createProformaInvoice({
+    quoteId: quote.id,
+    bankInfo: company.bankInfo,
+    paymentTerms: quote.paymentTerms ?? company.paymentTerms,
+    notes: payload.notes ? String(payload.notes) : null,
+  });
+  if (!pi) return { status: 'skipped', summary: '形式发票生成失败' };
+
+  let pdfPath: string | null = null;
+  try {
+    pdfPath = await generatePiPdf(quote.id);
+    if (pdfPath) updatePi(pi.id, { pdf_path: pdfPath });
+  } catch (error) {
+    ctx.log('PI pdf generation failed', error instanceof Error ? error.message : error);
+  }
+
+  ctx.emit({
+    type: EVENTS.PROFORMA_ISSUED,
+    entityType: 'proforma',
+    entityId: pi.id,
+    subject: `已生成形式发票 ${pi.piNo}（定金 ${pi.currency} ${pi.depositAmount.toFixed(2)}）`,
+    payload: {
+      piId: pi.id,
+      piNo: pi.piNo,
+      quoteId: quote.id,
+      customerId: quote.customerId,
+      total: pi.total,
+      currency: pi.currency,
+      depositPct: pi.depositPct,
+      depositAmount: pi.depositAmount,
+      balanceAmount: pi.balanceAmount,
+      milestones: (pi.milestones ?? []).map((milestone) => ({
+        id: milestone.id,
+        label: milestone.label,
+        amount: milestone.amount,
+        dueAt: milestone.dueAt,
+      })),
+    },
+  });
+
+  return {
+    status: 'succeeded',
+    summary: `形式发票 ${pi.piNo} 已生成，含 ${pi.milestones?.length ?? 0} 个回款节点`,
+    data: { piId: pi.id, piNo: pi.piNo, depositAmount: pi.depositAmount, balanceAmount: pi.balanceAmount },
+  };
 }
 
 async function repriceQuote(payload: Record<string, unknown>, ctx: AgentContext): Promise<AgentResult> {

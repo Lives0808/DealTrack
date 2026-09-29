@@ -28,11 +28,19 @@ import {
   CheckOutlined,
   CloseOutlined,
   FilePdfOutlined,
+  FileProtectOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
   SendOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
-import { api, type Inquiry, type Quote } from '../api';
+import {
+  api,
+  type Inquiry,
+  type ProformaInvoice,
+  type Quote,
+  type QuoteRevision,
+} from '../api';
 import { useApi } from '../hooks';
 import {
   Field,
@@ -47,6 +55,7 @@ import {
   relative,
 } from '../ui';
 import { PageHeader } from '../components/AppLayout';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 
 const LOSS_REASONS = [
   { value: 'price', label: '价格偏高' },
@@ -194,7 +203,20 @@ export function QuotesPage() {
         />
       </Card>
 
-      <QuoteDrawer quote={detail} open={Boolean(selected)} onClose={() => { setSelected(null); navigate('/quotes'); }} onChanged={() => { refresh(); refreshDetail(); }} />
+      <ErrorBoundary label="报价详情">
+        <QuoteDrawer
+          quote={detail}
+          open={Boolean(selected)}
+          onClose={() => {
+            setSelected(null);
+            navigate('/quotes');
+          }}
+          onChanged={() => {
+            refresh();
+            refreshDetail();
+          }}
+        />
+      </ErrorBoundary>
     </>
   );
 }
@@ -212,9 +234,18 @@ function QuoteDrawer({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  const [form] = Form.useForm();
   const [busy, setBusy] = useState<string | null>(null);
   const [outcomeOpen, setOutcomeOpen] = useState(false);
+  const [reviseOpen, setReviseOpen] = useState(false);
   const [declaration, setDeclaration] = useState<Record<string, unknown> | null>(null);
+
+  const { data: proforma, refresh: refreshProforma } = useApi<ProformaInvoice | null>(
+    quote ? `/api/quotes/${quote.id}/proforma` : null,
+  );
+  const { data: revisions, refresh: refreshRevisions } = useApi<QuoteRevision[]>(
+    quote ? `/api/quotes/${quote.id}/revisions` : null,
+  );
 
   const act = async (key: string, fn: () => Promise<unknown>, successText: string) => {
     setBusy(key);
@@ -276,8 +307,28 @@ function QuoteDrawer({
               </Button>
             )}
             {!['accepted', 'rejected'].includes(quote.status) && (
-              <Button icon={<CheckOutlined />} onClick={() => setOutcomeOpen(true)}>
-                登记结果
+              <>
+                <Button icon={<CheckOutlined />} onClick={() => setOutcomeOpen(true)}>
+                  登记结果
+                </Button>
+                <Button
+                  icon={<SwapOutlined />}
+                  onClick={() => {
+                    form.setFieldsValue({ reason: '', discountPct: 0, marginDeltaPct: -0.02 });
+                    setReviseOpen(true);
+                  }}
+                >
+                  改版报价
+                </Button>
+              </>
+            )}
+            {proforma && (
+              <Button
+                type="primary"
+                icon={<FileProtectOutlined />}
+                onClick={() => window.open(`/api/quotes/${quote.id}/proforma/document`, '_blank')}
+              >
+                形式发票
               </Button>
             )}
           </Space>
@@ -436,6 +487,151 @@ function QuoteDrawer({
             </Card>
           </Col>
 
+          <Col xs={24} lg={12}>
+            <Card
+              size="small"
+              title="形式发票与回款"
+              extra={
+                proforma ? (
+                  <Tag color={proforma.status === 'paid' ? 'green' : proforma.status === 'deposit_paid' ? 'blue' : 'orange'}>
+                    {proforma.status === 'paid' ? '已全款' : proforma.status === 'deposit_paid' ? '定金已收' : '待收款'}
+                  </Tag>
+                ) : null
+              }
+              styles={{ body: { paddingTop: 12 } }}
+            >
+              {!proforma ? (
+                <>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {quote.status === 'accepted'
+                      ? '正在由销售智能体生成形式发票…'
+                      : '登记成交后会自动生成形式发票，并按付款条款拆出定金与尾款节点。'}
+                  </Text>
+                  <div style={{ marginTop: 10 }}>
+                    <Button
+                      icon={<FileProtectOutlined />}
+                      loading={busy === 'pi'}
+                      onClick={() =>
+                        act(
+                          'pi',
+                          async () => {
+                            await api.post(`/api/quotes/${quote.id}/proforma`, {});
+                            refreshProforma();
+                          },
+                          '形式发票已生成',
+                        )
+                      }
+                    >
+                      立即生成
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Space direction="vertical" size={2} style={{ width: '100%', marginBottom: 10 }}>
+                    <Space size={6}>
+                      <Text strong className="dt-mono">{proforma.piNo}</Text>
+                      <Text type="secondary" style={{ fontSize: 11.5 }}>
+                        签发 {dateOnly(proforma.issuedAt)}
+                      </Text>
+                    </Space>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      定金 {money(proforma.depositAmount, proforma.currency)}（{(proforma.depositPct * 100).toFixed(0)}%）
+                      · 尾款 {money(proforma.balanceAmount, proforma.currency)}
+                    </Text>
+                  </Space>
+                  {(proforma.milestones ?? []).map((milestone) => (
+                    <div
+                      key={milestone.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '6px 0',
+                        borderTop: '1px solid #f5f7fa',
+                      }}
+                    >
+                      <div>
+                        <Text style={{ fontSize: 12.5 }}>
+                          {milestone.label === 'deposit' ? '定金' : milestone.label === 'balance' ? '尾款' : milestone.label}
+                        </Text>
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            应付 {dateOnly(milestone.dueAt)}
+                          </Text>
+                        </div>
+                      </div>
+                      <Space size={6}>
+                        <Text strong style={{ fontSize: 12.5 }}>{money(milestone.amount, milestone.currency)}</Text>
+                        <Tag color={milestone.status === 'paid' ? 'green' : milestone.status === 'overdue' ? 'red' : 'blue'}>
+                          {milestone.status === 'paid' ? '已收' : milestone.status === 'overdue' ? '逾期' : '待收'}
+                        </Tag>
+                      </Space>
+                    </div>
+                  ))}
+                  <Space style={{ marginTop: 10 }} wrap>
+                    <Button size="small" icon={<FilePdfOutlined />} onClick={() => window.open(`/api/quotes/${quote.id}/proforma/document`, '_blank')}>
+                      下载 PI
+                    </Button>
+                    <Button
+                      size="small"
+                      icon={<ReloadOutlined />}
+                      onClick={() => {
+                        refreshProforma();
+                        onChanged();
+                      }}
+                    >
+                      刷新
+                    </Button>
+                  </Space>
+                </>
+              )}
+            </Card>
+
+            {(revisions ?? []).length > 1 && (
+              <Card size="small" title="改版历史" style={{ marginTop: 14 }} styles={{ body: { paddingTop: 8 } }}>
+                {(revisions ?? []).map((entry, index) => {
+                  const previous = index > 0 ? revisions![index - 1] : null;
+                  const delta = previous ? entry.total - previous.total : 0;
+                  return (
+                    <div
+                      key={entry.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '6px 0',
+                        borderTop: index > 0 ? '1px solid #f5f7fa' : undefined,
+                      }}
+                    >
+                      <div>
+                        <Space size={6}>
+                          <Text strong className="dt-mono" style={{ fontSize: 12 }}>{entry.quoteNo}</Text>
+                          <Tag>v{entry.version}</Tag>
+                        </Space>
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 11.5 }}>
+                            {entry.revisionReason ?? '初版'} · {dateOnly(entry.createdAt)}
+                          </Text>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <Text style={{ fontSize: 12.5 }}>{money(entry.total, entry.currency)}</Text>
+                        {previous && (
+                          <div>
+                            <Text style={{ fontSize: 11, color: delta <= 0 ? '#1c7a3d' : '#d02f2f' }}>
+                              {delta <= 0 ? '↓' : '↑'} {Math.abs(delta).toFixed(0)}
+                            </Text>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </Card>
+            )}
+          </Col>
+
           {declaration && (
             <Col span={24}>
               <Card size="small" title={`报关要素表 · ${String(declaration.declarationNo ?? '')}`} styles={{ body: { paddingTop: 12 } }}>
@@ -482,6 +678,65 @@ function QuoteDrawer({
         onClose={() => setOutcomeOpen(false)}
         onDone={onChanged}
       />
+
+      <Modal
+        open={reviseOpen}
+        title={`改版报价 · ${quote.quoteNo}`}
+        onCancel={() => setReviseOpen(false)}
+        okText="生成新版本"
+        onOk={async () => {
+          const values = await form.validateFields();
+          try {
+            const result = await api.post<{ quote: Quote; delta: { total: number } }>(
+              `/api/quotes/${quote.id}/revise`,
+              values,
+            );
+            toast.success(
+              `已生成 ${result.quote.quoteNo}，总价变动 ${result.delta.total >= 0 ? '+' : ''}${result.delta.total.toFixed(0)}`,
+            );
+            setReviseOpen(false);
+            refreshRevisions();
+            onChanged();
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : '改版失败');
+          }
+        }}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="改版会保留完整谈判历史"
+          description="新版本关联到原报价，原报价标记为 superseded。一个月后客户问「怎么比上次贵」，这段历史就是答案。"
+        />
+        <Form form={form} layout="vertical">
+          <Form.Item name="reason" label="改版原因" rules={[{ required: true, message: '必须写清原因，用于复盘' }]}>
+            <Input.TextArea rows={2} placeholder="例如：客户砍价，下调毛利 3 个点换取 3 个柜的订单" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="marginDeltaPct" label="毛利调整" extra="-0.03 表示毛利下调 3 个百分点">
+                <InputNumber style={{ width: '100%' }} min={-0.5} max={0.5} step={0.01} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="discountPct" label="折扣（0–0.9）">
+                <InputNumber style={{ width: '100%' }} min={0} max={0.9} step={0.01} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="freight" label="运费覆盖（留空沿用）">
+                <InputNumber style={{ width: '100%' }} min={0} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="leadTimeDays" label="交期（天，留空沿用）">
+                <InputNumber style={{ width: '100%' }} min={1} max={365} />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Modal>
     </>
   );
 }

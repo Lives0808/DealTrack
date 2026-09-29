@@ -6,6 +6,7 @@ import { fill, getPhrasebook } from '../core/i18n.js';
 import {
   createMessage,
   createAlert,
+  cancelOpenFollowups,
   createFollowup,
   createThread,
   findOpenThreadFor,
@@ -19,7 +20,14 @@ import {
   appendThreadMessage,
 } from '../core/repos/engagement.js';
 import { getCustomer, getInquiry, updateInquiry, type Customer, type Inquiry } from '../core/repos/sales.js';
-import { getQuote, listQuotes } from '../core/repos/quoting.js';
+import { getQuote, lapsedQuotes, listQuotes, recordOutcome, updateQuote } from '../core/repos/quoting.js';
+import {
+  dueMilestones,
+  getPi,
+  markMilestoneReminded,
+  paymentSummary,
+  refreshOverdueMilestones,
+} from '../core/repos/billing.js';
 import { composeReply, renderTemplate } from './sales.js';
 import type { AgentContext, AgentDefinition, AgentResult } from './types.js';
 
@@ -32,6 +40,20 @@ const STAGE_BY_SEQUENCE: Record<number, string> = {
 
 export function stageForSequence(sequence: number): string {
   return STAGE_BY_SEQUENCE[sequence] ?? 'reengagement';
+}
+
+/**
+ * Which channel to actually use for a follow-up.
+ *
+ * v1 always sent email. For a WhatsApp-originated inquiry with no email address
+ * that meant the nudge went nowhere — the follow-up existed in the database and
+ * never reached a human. Channel is now decided per customer, and falls back to
+ * whatever contact detail we actually have.
+ */
+export function preferredChannel(customer: Customer, inquiryChannel?: string | null): 'email' | 'whatsapp' {
+  if (customer.email && inquiryChannel !== 'whatsapp') return 'email';
+  if (customer.whatsapp || customer.phone) return 'whatsapp';
+  return 'email';
 }
 
 /**
@@ -54,7 +76,17 @@ export const followupAgent: AgentDefinition = {
   name: 'followup',
   label: '跟单智能体',
   description: '排程跟进、异常预警、交期风险、超时升级拉群',
-  taskTypes: ['schedule_followups', 'sweep_due', 'draft_followup', 'detect_silence', 'detect_risks', 'escalate'],
+  taskTypes: [
+    'schedule_followups',
+    'sweep_due',
+    'draft_followup',
+    'detect_silence',
+    'detect_risks',
+    'expire_quotes',
+    'sweep_payments',
+    'draft_payment_reminder',
+    'escalate',
+  ],
 
   async handle(task, ctx) {
     switch (task.taskType) {
@@ -68,6 +100,12 @@ export const followupAgent: AgentDefinition = {
         return detectSilence(ctx);
       case 'detect_risks':
         return detectRisks(ctx);
+      case 'expire_quotes':
+        return expireQuotes(ctx);
+      case 'sweep_payments':
+        return sweepPayments(ctx);
+      case 'draft_payment_reminder':
+        return draftPaymentReminder(task.payload, ctx);
       case 'escalate':
         return escalate(task.payload, ctx);
       default:
@@ -101,12 +139,13 @@ async function scheduleFollowups(payload: Record<string, unknown>, ctx: AgentCon
     const sequence = index + 1;
     const stage = stageForSequence(sequence);
     const playbook = pickPlaybook(stage, customer.language, 'email');
+    const inquiry = quote.inquiryId ? getInquiry(quote.inquiryId, false) : null;
     const followup = createFollowup({
       inquiryId: quote.inquiryId,
       quoteId: quote.id,
       customerId: customer.id,
       sequenceNo: sequence,
-      channel: 'email',
+      channel: preferredChannel(customer, inquiry?.channel),
       dueAt: addDays(dayOffset, base),
       reason: `报价 ${quote.quoteNo} 第 ${sequence} 次跟进（D+${dayOffset}）`,
       intent: stage,
@@ -175,6 +214,8 @@ async function sweepDue(ctx: AgentContext): Promise<AgentResult> {
   // timer is paid once per minute, not once per concern.
   ctx.schedule({ agent: 'followup', taskType: 'detect_silence', priority: 400, dedupeKey: 'sweep:silence' });
   ctx.schedule({ agent: 'followup', taskType: 'detect_risks', priority: 400, dedupeKey: 'sweep:risks' });
+  ctx.schedule({ agent: 'followup', taskType: 'expire_quotes', priority: 400, dedupeKey: 'sweep:expire' });
+  ctx.schedule({ agent: 'followup', taskType: 'sweep_payments', priority: 400, dedupeKey: 'sweep:payments' });
 
   return {
     status: 'succeeded',
@@ -354,6 +395,263 @@ async function draftFollowup(payload: Record<string, unknown>, ctx: AgentContext
     status: 'waiting_approval',
     summary: `跟进 #${followup.sequenceNo} 草稿待确认（${customer.company}）`,
     data: { messageId: message.id, followupId: followup.id, sequenceNo: followup.sequenceNo },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 3b. expire_quotes — a lapsed quote must stop being "sent"
+//
+// v1 only raised an alert. The quote stayed in `sent` forever, which meant
+// `no_response` never appeared in the loss analytics — exactly the failure mode
+// the boss is trying to see.
+// ---------------------------------------------------------------------------
+
+async function expireQuotes(ctx: AgentContext): Promise<AgentResult> {
+  const lapsed = lapsedQuotes(0);
+  let expired = 0;
+  let closed = 0;
+
+  for (const quote of lapsed) {
+    updateQuote(quote.id, { status: 'expired' });
+    expired += 1;
+
+    ctx.emit({
+      type: EVENTS.QUOTE_EXPIRED,
+      entityType: 'quote',
+      entityId: quote.id,
+      subject: `报价 ${quote.quoteNo} 已过期`,
+      payload: {
+        quoteId: quote.id,
+        customerId: quote.customerId,
+        validUntil: quote.validUntil,
+        total: quote.total,
+      },
+    });
+
+    cancelOpenFollowups({ inquiryId: quote.inquiryId ?? undefined }, '报价已过期');
+
+    // Give the customer a grace period before calling it lost — a quote that
+    // lapsed three days ago may still be genuinely alive.
+    const graceDays = 7;
+    const overdueDays = quote.validUntil
+      ? (Date.now() - new Date(quote.validUntil).getTime()) / 86_400_000
+      : 0;
+    const alreadyClosed = ctx.db.get<Record<string, unknown>>(
+      'SELECT id FROM quote_outcomes WHERE quote_id = ? LIMIT 1',
+      quote.id,
+    );
+    if (overdueDays < graceDays || alreadyClosed) continue;
+
+    recordOutcome({
+      quoteId: quote.id,
+      result: 'no_response',
+      reasonCode: 'no_response',
+      reasonNote: `报价有效期至 ${quote.validUntil?.slice(0, 10) ?? '—'}，超期 ${Math.floor(overdueDays)} 天无回应，系统自动结单`,
+      decidedBy: 'agent:followup',
+    });
+    if (quote.inquiryId) {
+      updateInquiry(quote.inquiryId, { status: 'nurturing', lostAt: nowIso() });
+    }
+    closed += 1;
+
+    ctx.emit({
+      type: EVENTS.QUOTE_REJECTED,
+      entityType: 'quote',
+      entityId: quote.id,
+      subject: `自动结单：${quote.quoteNo} 超期无回应`,
+      payload: {
+        quoteId: quote.id,
+        reasonCode: 'no_response',
+        overdueDays: Math.floor(overdueDays),
+        auto: true,
+      },
+    });
+  }
+
+  return {
+    status: 'succeeded',
+    summary: `过期报价 ${expired} 张，自动结单 ${closed} 张`,
+    data: { expired, closed },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 3c. sweep_payments — 货发了，钱到了吗
+// ---------------------------------------------------------------------------
+
+async function sweepPayments(ctx: AgentContext): Promise<AgentResult> {
+  const flagged = refreshOverdueMilestones();
+  const due = dueMilestones();
+  let drafted = 0;
+
+  for (const milestone of due) {
+    // Don't nag more than once every three days, and never more than five times.
+    if (milestone.remindCount >= 5) continue;
+    if (milestone.remindedAt) {
+      const sinceHours = (Date.now() - new Date(milestone.remindedAt).getTime()) / 3_600_000;
+      if (sinceHours < 72) continue;
+    }
+
+    ctx.schedule({
+      agent: 'followup',
+      taskType: 'draft_payment_reminder',
+      payload: { milestoneId: milestone.id },
+      priority: 60,
+      dedupeKey: `payremind:${milestone.id}:${milestone.remindCount}`,
+    });
+    drafted += 1;
+  }
+
+  const summary = paymentSummary(new Date(Date.now() - 365 * 86_400_000).toISOString());
+  if (summary.overdueCount > 0) {
+    const existing = ctx.db.get<Record<string, unknown>>(
+      "SELECT id FROM alerts WHERE type = 'payment.overdue' AND acknowledged = 0 LIMIT 1",
+    );
+    if (!existing) {
+      createAlert({
+        type: 'payment.overdue',
+        severity: 'critical',
+        title: `${summary.overdueCount} 笔回款已逾期`,
+        body: `逾期金额合计 ${summary.overdue.toFixed(2)}。逾期最久：${summary.topOverdue
+          .slice(0, 3)
+          .map((entry) => `${entry.customer} ${entry.currency} ${entry.amount.toFixed(0)}（逾期 ${entry.daysLate} 天）`)
+          .join('、')}`,
+        entityType: 'payment',
+        entityId: 'batch',
+      });
+    }
+  }
+
+  return {
+    status: 'succeeded',
+    summary: `标记逾期 ${flagged} 笔，排入催款 ${drafted} 笔（未收 ${summary.outstanding.toFixed(2)}）`,
+    data: { flagged, drafted, outstanding: summary.outstanding, overdue: summary.overdue },
+  };
+}
+
+/**
+ * Draft a payment reminder in the customer's language.
+ *
+ * Reuses the `payment` subject line and closing from the phrasebook, so it reads
+ * like the rest of the correspondence rather than a system-generated dunning
+ * letter — which matters when the buyer is a small distributor you want to keep.
+ */
+async function draftPaymentReminder(payload: Record<string, unknown>, ctx: AgentContext): Promise<AgentResult> {
+  const milestoneId = String(payload.milestoneId ?? '');
+  const milestone = ctx.db.get<Record<string, unknown>>(
+    'SELECT * FROM payment_milestones WHERE id = ?',
+    milestoneId,
+  );
+  if (!milestone) return { status: 'skipped', summary: '回款节点不存在' };
+
+  const customer = getCustomer(String(milestone.customer_id));
+  if (!customer) return { status: 'skipped', summary: '客户不存在' };
+
+  const pi = milestone.pi_id ? getPi(String(milestone.pi_id)) : null;
+  const company = getCompany();
+  const sales = getSalesIdentity();
+  const book = getPhrasebook(customer.language);
+  const isDeposit = String(milestone.label) === 'deposit';
+  const amount = Number(milestone.amount ?? 0);
+  const currency = String(milestone.currency ?? 'USD');
+  const dueAt = milestone.due_at ? String(milestone.due_at) : null;
+  const daysLate = dueAt ? Math.floor((Date.now() - new Date(dueAt).getTime()) / 86_400_000) : 0;
+
+  const { data: draft } = await ctx.ask({
+    operation: 'draft_followup',
+    schema: z.object({
+      subject: z.string().default(''),
+      body: z.string().default(''),
+      language: z.string().default('en'),
+    }),
+    system: [
+      'You are an export salesperson writing a payment reminder to an overseas buyer.',
+      `Write in ${customer.language}.`,
+      'Rules:',
+      '- Warm and matter-of-fact. Never threatening, never accusatory.',
+      '- State the amount, what it is for, and the original due date exactly as given.',
+      '- Assume the best: invoices get missed, approvals take time.',
+      '- Ask one concrete question (has it been scheduled? do you need a revised PI?).',
+      '- Under 110 words. Return JSON {subject, body, language}.',
+    ].join('\n'),
+    user: [
+      `Customer: ${customer.company} (${customer.contactName ?? 'contact'}) in ${customer.country ?? 'unknown'}`,
+      `Milestone: ${isDeposit ? 'deposit' : 'balance payment'}`,
+      `Amount: ${currency} ${amount.toFixed(2)}`,
+      `Original due date: ${dueAt?.slice(0, 10) ?? 'n/a'}${daysLate > 0 ? ` (${daysLate} days ago)` : ''}`,
+      pi ? `Proforma invoice: ${pi.piNo} · total ${pi.currency} ${pi.total.toFixed(2)}` : '',
+    ].join('\n'),
+    context: {
+      stage: 'payment_reminder',
+      language: customer.language,
+      contactName: customer.contactName,
+      customerCompany: customer.company,
+      sellerCompany: company.name,
+      senderName: sales.senderName,
+      senderRole: sales.senderRole,
+      code: pi?.piNo ?? '',
+      currency,
+      total: amount,
+      leadTimeDays: 0,
+      paymentTerms: pi?.paymentTerms ?? company.paymentTerms,
+      validUntil: dueAt?.slice(0, 10) ?? '',
+      marketCount: company.marketCount,
+    },
+    fallback: () => ({
+      subject: fill(book.subject.payment, { code: pi?.piNo ?? '' }),
+      body: [
+        customer.contactName ? fill(book.greeting, { name: customer.contactName }) : book.greetingGeneric,
+        '',
+        `${pi?.piNo ? `PI ${pi.piNo}` : 'PI'} · ${isDeposit ? 'deposit' : 'balance'}: ${currency} ${amount.toFixed(2)}`,
+        dueAt ? `Original due date: ${dueAt.slice(0, 10)}` : '',
+        '',
+        book.ctaReply,
+        '',
+        [book.closing, sales.senderName, sales.senderRole, company.name].filter(Boolean).join('\n'),
+      ]
+        .filter((line) => line !== '')
+        .join('\n'),
+      language: customer.language,
+    }),
+  });
+
+  const channel = preferredChannel(customer);
+  const message = createMessage({
+    channel,
+    inquiryId: pi?.inquiryId ?? null,
+    quoteId: String(milestone.quote_id ?? '') || null,
+    customerId: customer.id,
+    toAddr: channel === 'whatsapp' ? customer.whatsapp ?? customer.phone ?? '' : customer.email ?? '',
+    fromAddr: sales.senderEmail,
+    subject: draft.subject || fill(book.subject.payment, { code: pi?.piNo ?? '' }),
+    body: draft.body,
+    language: customer.language,
+    status: 'pending_approval',
+    createdBy: 'agent:followup',
+  });
+
+  markMilestoneReminded(milestoneId);
+
+  ctx.emit({
+    type: EVENTS.PAYMENT_REMINDER_DRAFTED,
+    entityType: 'message',
+    entityId: message.id,
+    subject: `已起草催款：${customer.company} ${currency} ${amount.toFixed(2)}`,
+    payload: {
+      messageId: message.id,
+      milestoneId,
+      piId: pi?.id ?? null,
+      customerId: customer.id,
+      amount,
+      currency,
+      daysLate,
+    },
+  });
+
+  return {
+    status: 'waiting_approval',
+    summary: `催款草稿就绪：${customer.company} ${currency} ${amount.toFixed(2)}`,
+    data: { messageId: message.id, milestoneId, daysLate },
   };
 }
 

@@ -27,6 +27,37 @@ import { emit } from './events.js';
 
 export type Channel = 'email' | 'whatsapp' | 'web' | 'manual';
 
+/** Subjects that a mail client prefixes when the sender hits Reply. */
+const REPLY_PREFIX = /^\s*(re|re\[\d+\]|aw|sv|vs|antwort|res|答复|回复|回覆|返信|회신|رد)\s*[:：]/i;
+
+export function isReplySubject(subject: string | null | undefined): boolean {
+  if (!subject) return false;
+  return REPLY_PREFIX.test(subject);
+}
+
+/**
+ * Same conversation? Compare subjects with reply/forward prefixes stripped, so
+ * "Re: Re: Quotation QT-…" still matches "Quotation QT-…", while a genuinely new
+ * subject does not.
+ */
+export function sameConversation(a: string | null | undefined, b: string | null | undefined): boolean {
+  const normalize = (value: string | null | undefined): string =>
+    String(value ?? '')
+      .replace(REPLY_PREFIX, '')
+      .replace(/^(fwd?|fw|wg|tr)\s*[:：]/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  const left = normalize(a);
+  const right = normalize(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  // Tolerate "Re: <same thread>" where one side carries an extra reference tag.
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length <= right.length ? right : left;
+  return shorter.length > 12 && longer.includes(shorter);
+}
+
 export interface InboundInput {
   channel: Channel;
   fromEmail?: string | null;
@@ -124,20 +155,48 @@ export function ingestInbound(input: InboundInput): IngestResult {
   }
 
   // ---- Reply vs new inquiry ------------------------------------------------
-  // A message from a known customer with a live conversation is a reply, not a
-  // new lead. Getting this wrong is what makes CRMs fill up with duplicates.
+  //
+  // Getting this wrong cuts both ways, and v1 got it wrong in the expensive
+  // direction: any message from a known customer within 45 days was folded into
+  // their most recent inquiry. A distributor who bought last month and now wants
+  // a price on a different product had their new RFQ appended to the old thread,
+  // so the quote went out against the wrong line items.
+  //
+  // The rule is now: it is a reply only when we can *see* that it is one —
+  // an explicit thread, a reply-marked subject, or a conversation young enough
+  // that starting a new thread would be absurd.
   let replyTarget: Inquiry | null = null;
   if (found) {
     const open = listInquiries({ customerId: customer.id, limit: 10 }).filter(
       (inquiry) => !['won', 'lost', 'archived'].includes(inquiry.status),
     );
-    if (input.threadId) {
-      replyTarget = open.find((inquiry) => inquiry.threadId === input.threadId) ?? null;
-    }
-    if (!replyTarget && open.length > 0) {
-      const mostRecent = open[0]!;
-      const ageHours = (Date.now() - new Date(mostRecent.updatedAt).getTime()) / 3_600_000;
-      if (ageHours < 24 * 45) replyTarget = mostRecent;
+
+    const byThread = input.threadId
+      ? (open.find((inquiry) => inquiry.threadId === input.threadId) ?? null)
+      : null;
+
+    // With a subject on the message we can decide properly.
+    //
+    // A distributor who quoted last month and now sends "Neue Anfrage: 2000
+    // Campingstühle" is starting new business, even if their last message was
+    // four minutes ago. Recency alone is not evidence of a reply — v1 treated
+    // "recent" as "same conversation" and filed new RFQs into old threads, so
+    // the quotation went out against the wrong line items.
+    const hasSubject = Boolean(input.subject && input.subject.trim().length > 0);
+    const matchesExisting = open.find((inquiry) => sameConversation(inquiry.subject, input.subject)) ?? null;
+
+    if (byThread) {
+      replyTarget = byThread;
+    } else if (hasSubject) {
+      // A reply-marked subject, or an identical subject line, is the same thread.
+      const replyMarked = isReplySubject(input.subject);
+      replyTarget = matchesExisting && (replyMarked || matchesExisting.subject === input.subject) ? matchesExisting : null;
+    } else {
+      // No subject at all (WhatsApp, web form): fall back to recency, which is
+      // the only signal available.
+      const newest = open[0] ?? null;
+      const ageHours = newest ? (Date.now() - new Date(newest.updatedAt).getTime()) / 3_600_000 : Infinity;
+      replyTarget = ageHours < 72 ? newest : null;
     }
   }
 

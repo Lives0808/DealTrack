@@ -6,6 +6,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { AppRoutes } from './App';
 import { GlobalStyles } from './ui';
 import { AppLayout } from './components/AppLayout';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 // Surface uncaught errors on `window.__dtErrors`. The screenshot tool and any
 // smoke test can then assert "the page rendered" instead of trusting a PNG.
@@ -54,9 +55,15 @@ ReactDOM.createRoot(root).render(
       <AntApp>
         <GlobalStyles />
         <BrowserRouter>
-          <AppLayout>
-            <AppRoutes />
-          </AppLayout>
+          <ErrorBoundary label="应用外壳">
+            <AppLayout>
+              {/* Inner boundary keyed by route: a broken page shows its own
+                  error instead of taking the navigation and sidebar with it. */}
+              <ErrorBoundary label="当前页面">
+                <AppRoutes />
+              </ErrorBoundary>
+            </AppLayout>
+          </ErrorBoundary>
         </BrowserRouter>
       </AntApp>
     </ConfigProvider>

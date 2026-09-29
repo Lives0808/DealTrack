@@ -237,6 +237,10 @@ export interface Quote {
   customer?: Customer | null;
   outcome?: QuoteOutcome | QuoteOutcome[] | null;
   inquiry?: Inquiry | null;
+  /** Why this version exists, when it is a revision. */
+  revisionReason?: string | null;
+  /** Id of the newer version that replaced this one. */
+  supersededBy?: string | null;
 }
 
 export interface QuoteOutcome {
@@ -248,6 +252,76 @@ export interface QuoteOutcome {
   competitor: string | null;
   finalPrice: number | null;
   decidedAt: string;
+}
+
+export interface PaymentMilestone {
+  id: string;
+  piId: string | null;
+  quoteId: string | null;
+  customerId: string;
+  label: string;
+  sequenceNo: number;
+  amount: number;
+  currency: string;
+  dueAt: string | null;
+  status: string;
+  paidAmount: number;
+  paidAt: string | null;
+  method: string | null;
+  note: string | null;
+  remindedAt: string | null;
+  remindCount: number;
+}
+
+export interface ProformaInvoice {
+  id: string;
+  piNo: string;
+  quoteId: string;
+  inquiryId: string | null;
+  customerId: string;
+  currency: string;
+  incoterm: string;
+  incotermPlace: string;
+  subtotal: number;
+  freight: number;
+  insurance: number;
+  total: number;
+  depositPct: number;
+  depositAmount: number;
+  balanceAmount: number;
+  paymentTerms: string | null;
+  bankInfo: string | null;
+  shipmentDate: string | null;
+  validUntil: string | null;
+  language: string;
+  status: string;
+  notes: string | null;
+  pdfPath: string | null;
+  issuedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  milestones?: PaymentMilestone[];
+  customer?: Customer | null;
+}
+
+export interface QuoteRevision {
+  id: string;
+  quoteNo: string;
+  version: number;
+  total: number;
+  currency: string;
+  marginPct: number | null;
+  status: string;
+  revisionReason: string | null;
+  createdAt: string;
+}
+
+export interface RewriteAnalytics {
+  since: string;
+  sent: number;
+  rewritten: number;
+  rewriteRate: number;
+  byStage: Array<{ stage: string; sent: number; rewritten: number; rewriteRate: number }>;
 }
 
 export interface Message {
@@ -268,6 +342,10 @@ export interface Message {
   createdBy: string | null;
   sentAt: string | null;
   createdAt: string;
+  originalSubject?: string | null;
+  originalBody?: string | null;
+  editedBy?: string | null;
+  editedAt?: string | null;
 }
 
 export interface Followup {
@@ -419,6 +497,16 @@ export interface DomainEvent {
   subject: string | null;
   payload: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface CashflowSummary {
+  outstanding: number;
+  overdue: number;
+  collected: number;
+  overdueCount: number;
+  pendingCount: number;
+  byStatus: Record<string, number>;
+  topOverdue: Array<{ customer: string; amount: number; currency: string; label: string; dueAt: string | null; daysLate: number }>;
 }
 
 export interface Thread {

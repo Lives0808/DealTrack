@@ -474,7 +474,19 @@ function extractOffline(text: string, context: Record<string, unknown>): Extract
   const products: Array<Record<string, unknown>> = [];
   if (mentions.length > 0) {
     for (const mention of mentions) {
-      const hint = inferProductHint(`${mention.line}\n${clean}`, context);
+      // Hint from THIS line only.
+      //
+      // v1 passed the whole email, so the product-library match scored against
+      // every line at once and resolved every item to whichever product the
+      // email mentioned first. Two-item RFQs came out as two lines of the same
+      // SKU, and a line that could not be matched was silently given someone
+      // else's product instead of being flagged.
+      let hint = inferProductHint(mention.line, context);
+      if (hint === 'requested item') {
+        // Fall back to the subject, which often names the product when the line
+        // itself is just quantities.
+        hint = inferProductHint(String(context.subject ?? ''), context);
+      }
       // A bare number line ("2. 3,000 pcs 7-in-1 USB-C Hub") is common in RFQs;
       // Strip a leading list marker, but ONLY when a real separator follows it —
       // otherwise "500ml Vacuum Insulated Mug" quietly becomes "ml … Mug".
@@ -551,7 +563,10 @@ function inferProductHint(text: string, context: Record<string, unknown>): strin
       const tokens = `${product.name_en} ${product.name_zh ?? ''} ${product.sku}`
         .toLowerCase()
         .split(/[\s,/|-]+/)
-        .filter((t) => t.length > 2);
+        // Bare numbers carry no product identity — "500" in `MUG-INSUL-500`
+        // otherwise matches "500 pcs" in any unrelated line and hands that line
+        // the mug as its product.
+        .filter((t) => t.length > 2 && !/^\d+$/.test(t));
       const score = tokens.reduce((acc, token) => (lowered.includes(token) ? acc + 1 : acc), 0);
       if (score > 0 && (!best || score > best.score)) best = { hint: product.name_en, score };
     }
@@ -564,7 +579,16 @@ function inferProductHint(text: string, context: Record<string, unknown>): strin
       text,
     );
   if (match) return match[1]!.trim().replace(/\s+/g, ' ');
-  return 'requested item';
+
+  // Nothing matched: quote the customer's own line back to them, minus the list
+  // bullet. Their words describe the item better than any normalisation we could
+  // invent, and the unmatched-line report is read by a human anyway.
+  const fallback = text
+    .split('\n')[0]!
+    .replace(/^\s*(?:[-*•・]|\d{1,2}[.)、])\s*/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return fallback.length > 2 ? fallback : 'requested item';
 }
 
 export function guessPort(country: string): string | null {

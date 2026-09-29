@@ -32,6 +32,7 @@ import {
 import { getCustomer, getInquiry } from '../../core/repos/sales.js';
 import { dispatch } from '../../agents/orchestrator.js';
 import { actorOf, body, fail, intParam, ok, query } from '../context.js';
+import { PlaybookInput, dropNulls, validate } from '../validate.js';
 
 export function registerDealRoutes(app: FastifyInstance): void {
   // =========================================================================
@@ -184,11 +185,9 @@ export function registerDealRoutes(app: FastifyInstance): void {
 
     cancelOpenFollowups({ inquiryId: quote.inquiryId ?? undefined }, `结果已登记：${result}`);
 
-    if (result === 'won') {
-      dispatch({ agent: 'customs', taskType: 'draft_declaration', payload: { quoteId: quote.id }, dedupeKey: `declaration:${quote.id}` });
-      app.log.info(`[deals] quote ${quote.quoteNo} won`);
-    }
-
+    // Downstream work (proforma invoice, customs declaration) is triggered by
+    // the `quote.accepted` event that `recordOutcome` emits.
+    if (result === 'won') app.log.info(`[deals] quote ${quote.quoteNo} won`);
     return ok(outcome);
   });
 
@@ -329,22 +328,24 @@ export function registerDealRoutes(app: FastifyInstance): void {
   });
 
   app.post('/api/playbooks', async (request, reply) => {
-    const input = body<{ name?: string; bodyTpl?: string } & Record<string, unknown>>(request);
-    if (!input.name || !input.bodyTpl) return reply.code(400).send(fail('name 与 bodyTpl 必填'));
-    return reply.code(201).send(ok(upsertPlaybook(input as never)));
+    const input = validate(PlaybookInput, request.body, reply);
+    if (!input) return reply;
+    return reply.code(201).send(ok(upsertPlaybook(input)));
   });
 
   app.patch('/api/playbooks/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const existing = listPlaybooks({ activeOnly: false }).find((book) => book.id === id);
     if (!existing) return reply.code(404).send(fail('话术不存在', 404, 'not_found'));
-    const input = body<Record<string, unknown>>(request);
+
+    const patch = validate(PlaybookInput.partial(), request.body, reply);
+    if (!patch) return reply;
     const saved = upsertPlaybook({
+      ...dropNulls(patch),
       id: existing.id,
-      name: (input.name as string) ?? existing.name,
-      bodyTpl: (input.bodyTpl as string) ?? existing.bodyTpl,
-      ...input,
-    } as never);
+      name: patch.name ?? existing.name,
+      bodyTpl: patch.bodyTpl ?? existing.bodyTpl,
+    });
     return ok(saved);
   });
 

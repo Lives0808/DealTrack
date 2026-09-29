@@ -1,0 +1,84 @@
+# DealTrack — 一键自部署
+#
+#   cp .env.example .env         # 至少改掉 DEALTRACK_API_TOKEN
+#   docker compose up -d
+#   open http://localhost:8787
+#
+# 数据落在命名卷 `dealtrack-data` 里。备份：
+#   docker run --rm -v dealtrack-data:/data -v "$PWD":/backup alpine \
+#     tar czf /backup/dealtrack-$(date +%F).tgz -C /data .
+
+services:
+  dealtrack:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dealtrack:latest
+    container_name: dealtrack
+    restart: unless-stopped
+
+    ports:
+      - "${DEALTRACK_PORT:-8787}:8787"
+
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8787"
+      DEALTRACK_DATA_DIR: /data
+
+      # 对外部署务必替换：openssl rand -base64 24
+      DEALTRACK_API_TOKEN: ${DEALTRACK_API_TOKEN:-dealtrack-dev-token}
+
+      # 指标基线
+      DEALTRACK_BASELINE_MINUTES: ${DEALTRACK_BASELINE_MINUTES:-30}
+      DEALTRACK_TARGET_MINUTES: ${DEALTRACK_TARGET_MINUTES:-3}
+
+      # BYOK（也可在界面「设置 → AI 模型」里配，界面优先）
+      DEALTRACK_LLM_PROVIDER: ${DEALTRACK_LLM_PROVIDER:-mock}
+      DEALTRACK_LLM_MODEL: ${DEALTRACK_LLM_MODEL:-}
+      DEALTRACK_LLM_BASE_URL: ${DEALTRACK_LLM_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+
+      # 邮件（留空 = 模拟发送）
+      DEALTRACK_EMAIL_ENABLED: ${DEALTRACK_EMAIL_ENABLED:-0}
+      DEALTRACK_IMAP_HOST: ${DEALTRACK_IMAP_HOST:-}
+      DEALTRACK_SMTP_HOST: ${DEALTRACK_SMTP_HOST:-}
+      DEALTRACK_EMAIL_USER: ${DEALTRACK_EMAIL_USER:-}
+      DEALTRACK_EMAIL_PASSWORD: ${DEALTRACK_EMAIL_PASSWORD:-}
+
+      # WhatsApp（留空 = 模拟发送）
+      DEALTRACK_WHATSAPP_ENABLED: ${DEALTRACK_WHATSAPP_ENABLED:-0}
+      DEALTRACK_WHATSAPP_PHONE_NUMBER_ID: ${DEALTRACK_WHATSAPP_PHONE_NUMBER_ID:-}
+      DEALTRACK_WHATSAPP_ACCESS_TOKEN: ${DEALTRACK_WHATSAPP_ACCESS_TOKEN:-}
+      DEALTRACK_WHATSAPP_VERIFY_TOKEN: ${DEALTRACK_WHATSAPP_VERIFY_TOKEN:-}
+
+      TZ: ${TZ:-Asia/Shanghai}
+
+    volumes:
+      # 数据库、导出文档、加密主密钥都在这里。丢了就要重新配一次密钥。
+      - dealtrack-data:/data
+
+    # Chromium 渲染 PDF 需要一点额外共享内存
+    shm_size: 512m
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  dealtrack-data:
+    driver: local

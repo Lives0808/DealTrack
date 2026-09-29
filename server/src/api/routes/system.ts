@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { getDb } from '../../core/db.js';
 import { config } from '../../core/config.js';
 import { getBus, EVENTS } from '../../core/events.js';
@@ -27,20 +27,23 @@ import { getCustomer, listInquiries, updateInquiry } from '../../core/repos/sale
 import { listUsers, upsertUser } from '../../core/repos/catalog.js';
 import { getProduct, listProducts, matchProducts, upsertProduct, upsertTier } from '../../core/repos/catalog.js';
 import { verifyEmailConfig } from '../../integrations/messaging.js';
+import { z } from 'zod';
 import { syncEmailInbox } from '../../integrations/email.js';
 import { AGENTS, dispatch, getAgent } from '../../agents/orchestrator.js';
 import { actorOf, body, fail, intParam, ok, query, sseClientCount } from '../context.js';
+import { ProductInput, TierInput, UserInput, dropNulls, validate } from '../validate.js';
 
 export function registerSystemRoutes(app: FastifyInstance): void {
   // =========================================================================
   // Health & meta
   // =========================================================================
 
-  app.get('/api/health', async () => {
+  app.get('/api/health', async (request) => {
     const db = getDb();
     return ok({
       status: 'ok',
       at: nowIso(),
+      requestId: (request as { requestId?: string }).requestId ?? null,
       database: {
         file: config.dbFile,
         events: db.count('SELECT COUNT(*) FROM events'),
@@ -474,12 +477,14 @@ export function registerSystemRoutes(app: FastifyInstance): void {
   });
 
   app.post('/api/products', async (request, reply) => {
-    const input = body<{ sku?: string; nameEn?: string; tiers?: Array<Record<string, unknown>> }>(request);
-    if (!input.sku || !input.nameEn) return reply.code(400).send(fail('sku 与 nameEn 必填'));
-    const product = upsertProduct(input as never);
-    for (const tier of input.tiers ?? []) {
-      upsertTier({ ...(tier as Record<string, unknown>), productId: product.id } as never);
-    }
+    const payload = body<Record<string, unknown>>(request);
+    const input = validate(ProductInput, payload, reply);
+    if (!input) return reply;
+    const tiers = validateTiers(payload.tiers, reply);
+    if (tiers === null) return reply;
+
+    const product = upsertProduct(dropNulls(input));
+    for (const tier of tiers) upsertTier({ ...tier, productId: product.id });
     return reply.code(201).send(ok(getProduct(product.id, true)));
   });
 
@@ -487,11 +492,20 @@ export function registerSystemRoutes(app: FastifyInstance): void {
     const { id } = request.params as { id: string };
     const existing = getProduct(id, false);
     if (!existing) return reply.code(404).send(fail('产品不存在', 404, 'not_found'));
-    const input = body<{ tiers?: Array<Record<string, unknown>> }>(request);
-    const product = upsertProduct({ ...(input as Record<string, unknown>), id: existing.id, sku: existing.sku, nameEn: existing.nameEn } as never);
-    for (const tier of input.tiers ?? []) {
-      upsertTier({ ...(tier as Record<string, unknown>), productId: product.id } as never);
-    }
+
+    const payload = body<Record<string, unknown>>(request);
+    const patch = validate(ProductInput.partial(), payload, reply);
+    if (!patch) return reply;
+    const tiers = validateTiers(payload.tiers, reply);
+    if (tiers === null) return reply;
+
+    const product = upsertProduct({
+      ...dropNulls(patch),
+      id: existing.id,
+      sku: patch.sku ?? existing.sku,
+      nameEn: patch.nameEn ?? existing.nameEn,
+    });
+    for (const tier of tiers) upsertTier({ ...tier, productId: product.id });
     return ok(getProduct(product.id, true));
   });
 
@@ -687,13 +701,26 @@ export function registerSystemRoutes(app: FastifyInstance): void {
   app.get('/api/users', async () => ok(listUsers()));
 
   app.post('/api/users', async (request, reply) => {
-    const input = body<{ name?: string } & Record<string, unknown>>(request);
-    if (!input.name) return reply.code(400).send(fail('name 必填'));
-    return reply.code(201).send(ok(upsertUser(input as never)));
+    const input = validate(UserInput, request.body, reply);
+    if (!input) return reply;
+    return reply.code(201).send(ok(upsertUser({ ...dropNulls(input), email: input.email || undefined })));
   });
 }
 
 // ---------------------------------------------------------------------------
+
+/** Tiers arrive nested inside the product payload; validate them separately. */
+function validateTiers(raw: unknown, reply: FastifyReply): Array<z.infer<typeof TierInput>> | null {
+  if (raw === undefined || raw === null) return [];
+  const parsed = z.array(TierInput).max(20).safeParse(raw);
+  if (parsed.success) return parsed.data;
+  reply.code(400).send({
+    ok: false,
+    error: 'validation_error',
+    message: `价格阶梯校验失败：${parsed.error.issues.map((issue) => `#${issue.path.join('.')} ${issue.message}`).join('；')}`,
+  });
+  return null;
+}
 
 function addHoursAgo(hours: number): string {
   return new Date(Date.now() - hours * 3_600_000).toISOString();

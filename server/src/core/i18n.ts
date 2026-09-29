@@ -580,8 +580,7 @@ const PARTIAL: Record<string, Partial<Phrasebook>> = {
     quoteReady: 'In allegato trovate la nostra offerta {code} per la vostra valutazione.',
     priceValid: 'I prezzi sopra indicati sono validi fino al {date}.',
     ctaReply: 'Potreste confermare quantità e porto di destinazione così blocchiamo questo prezzo?',
-    closing_words: undefined as never,
-  } as Partial<Phrasebook>,
+  },
   tr: {
     greeting: 'Sayın {name},',
     greetingGeneric: 'Sayın Yetkili,',

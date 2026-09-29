@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { config } from '../core/config.js';
 import { getDb } from '../core/db.js';
@@ -10,6 +11,7 @@ import { registerAuth, registerSse, ok } from './context.js';
 import { registerInboxRoutes } from './routes/inbox.js';
 import { registerDealRoutes } from './routes/deals.js';
 import { registerSystemRoutes } from './routes/system.js';
+import { registerBillingRoutes } from './routes/billing.js';
 
 /**
  * The HTTP surface.
@@ -43,12 +45,56 @@ export async function buildServer(): Promise<FastifyInstance> {
     limits: { fileSize: 25 * 1024 * 1024, files: 10 },
   });
 
+  /**
+   * Request correlation.
+   *
+   * Every response carries `x-request-id` and every log line includes it, so
+   * "the quote PDF 500'd at 14:20" can be traced to one request instead of
+   * grepping a wall of output. An inbound id is honoured, which means a proxy or
+   * the Android client can supply its own and join the two sides up.
+   */
+  app.addHook('onRequest', async (request, reply) => {
+    const inbound = String(request.headers['x-request-id'] ?? '').slice(0, 64);
+    const id = /^[\w.:-]{6,64}$/.test(inbound) ? inbound : `req_${randomUUID().slice(0, 12)}`;
+    (request as { requestId?: string }).requestId = id;
+    reply.header('x-request-id', id);
+  });
+
+  /**
+   * Structured request log.
+   *
+   * Logs the outcome and duration of anything slow or failing, plus every write.
+   * Reads of the dashboard are deliberately excluded — they poll every few
+   * seconds and would drown the signal.
+   */
+  app.addHook('onResponse', async (request, reply) => {
+    const id = (request as { requestId?: string }).requestId ?? '-';
+    const durationMs = Math.round(reply.elapsedTime);
+    const isWrite = request.method !== 'GET';
+    const failed = reply.statusCode >= 400;
+    const slow = durationMs > 1000;
+    if (!failed && !slow && !isWrite) return;
+
+    const line = {
+      level: failed ? (reply.statusCode >= 500 ? 'error' : 'warn') : 'info',
+      requestId: id,
+      method: request.method,
+      url: request.url.split('?')[0],
+      status: reply.statusCode,
+      durationMs,
+      msg: `${request.method} ${request.url.split('?')[0]} → ${reply.statusCode} (${durationMs}ms)`,
+    };
+    if (failed) app.log.error(line, 'request failed');
+    else app.log.info(line);
+  });
+
   registerAuth(app);
   registerSse(app);
 
   registerInboxRoutes(app);
   registerDealRoutes(app);
   registerSystemRoutes(app);
+  registerBillingRoutes(app);
 
   // Serve the built SPA when it exists. This has to happen BEFORE the fallback
   // `/` route below, otherwise @fastify/static and the explicit handler fight

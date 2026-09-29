@@ -18,6 +18,30 @@ X-DealTrack-Actor: user:boss        # 可选，用于审计「谁批的」
 
 ---
 
+### 请求关联
+
+每个响应都带 `x-request-id`（请求头里带了就沿用）。排查问题时用它把日志、事件和消息串起来。
+
+```bash
+curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8787/api/health
+# x-request-id: req_a1b2c3d4e5f6
+```
+
+### 输入校验
+
+所有写接口都过 zod 校验，非法输入在边界就拒绝，不会写库：
+
+```json
+{
+  "ok": false,
+  "error": "validation_error",
+  "message": "请求参数校验失败：email 邮箱格式不正确",
+  "issues": [{ "field": "email", "message": "邮箱格式不正确" }]
+}
+```
+
+---
+
 ## 公开接口
 
 | 方法 | 路径 | 说明 |
@@ -102,14 +126,76 @@ curl -X POST http://localhost:8787/api/quotes/$QUOTE_ID/outcome \
 
 ---
 
+## 形式发票与回款
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/proformas` | PI 列表。参数：`status` `customerId` |
+| GET | `/api/proformas/:id` | PI 详情（含回款节点） |
+| GET | `/api/quotes/:id/proforma` | 取该报价的 PI |
+| POST | `/api/quotes/:id/proforma` | 签发 PI（已存在则复用），可传 `depositPct`、`bankInfo`、`paymentTerms` |
+| GET | `/api/quotes/:id/proforma/document` | PI 文档（`?format=html` 取 HTML 源） |
+| PATCH | `/api/proformas/:id` | 更新状态/银行信息/出运日期 |
+| POST | `/api/proformas/:id/milestones` | 追加分期（如协商出的第三期） |
+| GET | `/api/payments` | 回款节点列表。参数：`status`（可逗号分隔）`customerId` `dueBefore` |
+| GET | `/api/payments/summary` | 回款汇总：未收 / 逾期 / 已收 / 回款率 / 逾期明细 |
+| POST | `/api/payments/:id/paid` | **登记收款**（可传 `amount` 支持部分收款） |
+| PATCH | `/api/payments/:id` | 调整金额/到期日/状态 |
+| POST | `/api/payments/:id/remind` | 立即让跟单智能体起草催款 |
+
+### 成交 → 形式发票 → 收款
+
+```bash
+# 1. 登记成交（会自动生成 PI + 报关要素表 + 回款节点）
+curl -X POST http://localhost:8787/api/quotes/$QUOTE_ID/outcome \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"result":"won","reasonNote":"客户邮件确认"}'
+
+# 2. 查看 PI 与回款节点
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8787/api/quotes/$QUOTE_ID/proforma
+
+# 3. 收到定金
+curl -X POST http://localhost:8787/api/payments/$MILESTONE_ID/paid \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"amount":20876.30,"method":"T/T","note":"水单号 123456"}'
+```
+
+`quote.accepted` 事件会同时触发 `sales.create_proforma` 与 `customs.draft_declaration`，
+所以无论从 API、智能体还是脚本登记成交，行为完全一致。
+
+---
+
+## 报价改版
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/quotes/:id/revise` | 生成新版本，**必须传 `reason`** |
+| GET | `/api/quotes/:id/revisions` | 完整改版链（含每版价差） |
+| GET | `/api/quotes/open` | 未结单报价（含距过期天数） |
+| POST | `/api/quotes/:id/close` | 快捷结单（won / lost / no_response） |
+| GET | `/api/analytics/rewrites` | 改稿率分析：AI 的措辞有多少被原样采用 |
+| GET | `/api/messages/:id/rewrite` | 某条消息的「AI 原稿 vs 实际发出」对照 |
+
+```bash
+curl -X POST http://localhost:8787/api/quotes/$QUOTE_ID/revise \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"reason":"客户砍价，让 2 个点","discountPct":0.02,"marginDeltaPct":-0.01}'
+```
+
+返回新版本、原版本摘要与价差。原报价状态变为 `superseded`，历史通过
+`parent_quote_id` / `superseded_by` 双向关联。
+
+---
+
 ## 消息
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/messages` | 列表。参数：`status` `inquiryId` `customerId` `channel` |
-| PATCH | `/api/messages/:id` | 编辑草稿的主题/正文 |
+| PATCH | `/api/messages/:id` | 编辑草稿的主题/正文（**首次改动会留存原稿**，用于改稿率分析） |
 | POST | `/api/messages/:id/approve` | **确认并发送** —— 那 3 分钟的人工步骤 |
 | POST | `/api/messages/:id/reject` | 退回为草稿 |
+| POST | `/api/messages/:id/revert` | 还原为 AI 原稿 |
 | POST | `/api/messages/:id/mark-sent` | 标记为已发送（线下发送后用） |
 
 ---
@@ -301,4 +387,8 @@ source.addEventListener('heartbeat', (event) => {
 | `risk.lead_time` / `sla.at_risk` / `sla.breached` | 风险 |
 | `thread.opened` / `thread.message` | 业务对齐群 |
 | `customs.declaration_drafted` / `customs.compliance_issue` | 报关 |
+| `quote.partial_match` | 询盘有行未匹配产品库，未计入报价 |
+| `proforma.issued` | 形式发票已签发（含回款节点） |
+| `payment.due` / `payment.overdue` / `payment.received` | 回款生命周期 |
+| `payment.reminder_drafted` | 催款草稿已就绪 |
 | `agent.run.succeeded` / `agent.run.failed` / `task.enqueued` / `task.dead` | 平台自身 |

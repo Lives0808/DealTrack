@@ -17,11 +17,17 @@ import {
   updateInquiry,
   upsertCustomer,
 } from '../../core/repos/sales.js';
-import { listMessages, updateMessage } from '../../core/repos/engagement.js';
+import { bumpPlaybook, getMessage, listMessages, recordHumanEdit, updateMessage } from '../../core/repos/engagement.js';
 import { listQuotes } from '../../core/repos/quoting.js';
 import { dispatch } from '../../agents/orchestrator.js';
 import { actorOf, body, fail, intParam, ok, query } from '../context.js';
+import { CustomerInput, InboundEmailInput, ManualInquiryInput, MessageEditInput, dropNulls, validate } from '../validate.js';
 import { nowIso } from '../../core/util.js';
+
+/** `''` from an HTML form means "cleared / not supplied", not an empty string. */
+function emptyToUndefined(value: string | null | undefined): string | undefined {
+  return value === null || value === undefined || value === '' ? undefined : value;
+}
 
 export function registerInboxRoutes(app: FastifyInstance): void {
   // =========================================================================
@@ -77,25 +83,14 @@ export function registerInboxRoutes(app: FastifyInstance): void {
 
   /** Manual ingest — the "粘贴一封询盘" path. Triggers the whole pipeline. */
   app.post('/api/inquiries', async (request, reply) => {
-    const input = body<{
-      company?: string;
-      contactName?: string;
-      email?: string;
-      phone?: string;
-      channel?: Channel;
-      subject?: string;
-      body?: string;
-      autoRun?: boolean;
-    }>(request);
-
-    if (!input.body || input.body.trim().length < 3) {
-      return reply.code(400).send(fail('询盘正文不能为空'));
-    }
+    const input = validate(ManualInquiryInput, request.body, reply);
+    if (!input) return reply;
 
     const result = ingestManual({
       company: input.company,
       contactName: input.contactName,
-      email: input.email,
+      // An empty form field means "not provided", not "blank value".
+      email: input.email || null,
       phone: input.phone,
       channel: input.channel ?? 'manual',
       subject: input.subject,
@@ -223,9 +218,16 @@ export function registerInboxRoutes(app: FastifyInstance): void {
   });
 
   app.post('/api/customers', async (request, reply) => {
-    const input = body<{ company?: string } & Record<string, unknown>>(request);
-    if (!input.company) return reply.code(400).send(fail('公司名称必填'));
-    const result = upsertCustomer(input as never);
+    const input = validate(CustomerInput, request.body, reply);
+    if (!input) return reply;
+    const result = upsertCustomer({
+      ...dropNulls(input),
+      // `language` is non-nullable on Customer, and a blank form field is
+      // "unspecified" rather than a value.
+      language: input.language ?? undefined,
+      email: emptyToUndefined(input.email),
+      countryCode: emptyToUndefined(input.countryCode),
+    });
     return reply.code(result.created ? 201 : 200).send(ok(result));
   });
 
@@ -233,8 +235,17 @@ export function registerInboxRoutes(app: FastifyInstance): void {
     const { id } = request.params as { id: string };
     const existing = getCustomer(id);
     if (!existing) return reply.code(404).send(fail('客户不存在', 404, 'not_found'));
-    const patch = body<Record<string, unknown>>(request);
-    const result = upsertCustomer({ ...patch, id: existing.id, company: existing.company } as never);
+
+    const patch = validate(CustomerInput.partial(), request.body, reply);
+    if (!patch) return reply;
+    const result = upsertCustomer({
+      ...dropNulls(patch),
+      language: patch.language ?? undefined,
+      email: emptyToUndefined(patch.email),
+      countryCode: emptyToUndefined(patch.countryCode),
+      id: existing.id,
+      company: patch.company ?? existing.company,
+    });
     return ok(result.customer);
   });
 
@@ -255,15 +266,58 @@ export function registerInboxRoutes(app: FastifyInstance): void {
     );
   });
 
+  /**
+   * Edit a draft.
+   *
+   * The agent's original wording is captured the first time a human changes it,
+   * because "how often does the team rewrite the AI?" is the only honest measure
+   * of whether a template works. Without it the playbook ranking counts usage,
+   * and a template everyone rewrites looks like a top performer.
+   */
   app.patch('/api/messages/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const input = body<{ subject?: string; body?: string }>(request);
-    const patch: Record<string, unknown> = {};
-    if (input.subject !== undefined) patch.subject = input.subject;
-    if (input.body !== undefined) patch.body = input.body;
-    if (Object.keys(patch).length === 0) return reply.code(400).send(fail('没有需要更新的字段'));
-    updateMessage(id, patch);
-    return ok({ id, updated: true });
+    const input = validate(MessageEditInput, request.body, reply);
+    if (!input) return reply;
+    if (input.subject == null && input.body == null) {
+      return reply.code(400).send(fail('没有需要更新的字段'));
+    }
+
+    const result = recordHumanEdit(id, {
+      subject: input.subject,
+      body: input.body,
+      editor: actorOf(request),
+    });
+    if (!result.changed) return ok({ id, updated: false, detail: '内容与原稿一致，未记录改动' });
+
+    // Attribute the rewrite to the template that produced the draft, so a
+    // template that always gets rewritten loses ranking against one that ships.
+    const message = getMessage(id);
+    if (message?.followupId) {
+      const followup = getDb().get<Record<string, unknown>>(
+        'SELECT template_id FROM followups WHERE id = ?',
+        message.followupId,
+      );
+      if (followup?.template_id) bumpPlaybook(String(followup.template_id), 'edit_count');
+    }
+
+    return ok({ id, updated: true, original: result.revertToOriginal });
+  });
+
+  /** Restore a draft to what the agent originally wrote. */
+  app.post('/api/messages/:id/revert', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const message = getMessage(id);
+    if (!message) return reply.code(404).send(fail('消息不存在', 404, 'not_found'));
+    if (!message.originalBody) return ok({ id, reverted: false, detail: '这封草稿没有被改过' });
+    updateMessage(id, {
+      subject: message.originalSubject,
+      body: message.originalBody,
+      original_subject: null,
+      original_body: null,
+      edited_by: null,
+      edited_at: null,
+    });
+    return ok({ id, reverted: true });
   });
 
   /** Approve and send. This is the 3-minute human step. */
@@ -319,31 +373,21 @@ export function registerInboxRoutes(app: FastifyInstance): void {
   // Inbound webhooks — where the integrations hand messages to DealTrack
   // =========================================================================
 
-  app.post('/api/inbound/email', async (request) => {
-    const input = body<{
-      from: string;
-      fromName?: string;
-      to?: string;
-      subject?: string;
-      text?: string;
-      html?: string;
-      messageId?: string;
-      threadId?: string;
-      receivedAt?: string;
-      attachments?: Array<{ filename: string; mime?: string; size?: number; path?: string }>;
-    }>(request);
+  app.post('/api/inbound/email', async (request, reply) => {
+    const input = validate(InboundEmailInput, request.body, reply);
+    if (!input) return reply;
 
     const result = ingestInbound({
       channel: 'email',
       fromEmail: input.from,
-      fromName: input.fromName,
-      toAddr: input.to,
-      subject: input.subject,
+      fromName: input.fromName ?? null,
+      toAddr: input.to ?? null,
+      subject: input.subject ?? null,
       body: input.text ?? input.html ?? '',
-      messageId: input.messageId,
-      threadId: input.threadId,
-      receivedAt: input.receivedAt,
-      attachments: input.attachments,
+      messageId: input.messageId ?? null,
+      threadId: input.threadId ?? null,
+      receivedAt: input.receivedAt ?? undefined,
+      attachments: input.attachments ?? [],
     });
 
     return ok({

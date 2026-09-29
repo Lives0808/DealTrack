@@ -114,7 +114,15 @@ const ROUTES: Route[] = [
     payload: (event) => ({ inquiryId: event.payload.inquiryId, body: event.payload.body }),
   },
 
-  // ---- Won: start customs work -----------------------------------------
+  // ---- Won: issue the proforma invoice, then start customs work ---------
+  {
+    on: EVENTS.QUOTE_ACCEPTED,
+    agent: 'sales',
+    taskType: 'create_proforma',
+    priority: 40,
+    dedupe: (event) => `proforma:${event.payload.quoteId}`,
+    payload: (event) => ({ quoteId: event.payload.quoteId }),
+  },
   {
     on: EVENTS.QUOTE_ACCEPTED,
     agent: 'customs',

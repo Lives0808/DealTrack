@@ -59,6 +59,14 @@ export const EVENTS = {
   SLA_AT_RISK: 'sla.at_risk',
   SLA_BREACHED: 'sla.breached',
 
+  // Closing the deal: quote → PI → money → shipment
+  QUOTE_PARTIAL_MATCH: 'quote.partial_match',
+  PROFORMA_ISSUED: 'proforma.issued',
+  PAYMENT_DUE: 'payment.due',
+  PAYMENT_OVERDUE: 'payment.overdue',
+  PAYMENT_RECEIVED: 'payment.received',
+  PAYMENT_REMINDER_DRAFTED: 'payment.reminder_drafted',
+
   // Customs
   DECLARATION_DRAFTED: 'customs.declaration_drafted',
   COMPLIANCE_ISSUE: 'customs.compliance_issue',

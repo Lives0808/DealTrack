@@ -14,7 +14,7 @@
  *   an agent runs → it writes more events. Everything an agent does is auditable.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -556,7 +556,95 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 `;
 
+
+/**
+ * v2 — closing the gap between "quoted" and "paid".
+ *
+ * Three additions, all driven by things the first version got wrong in practice:
+ *
+ * 1. `original_subject` / `original_body` on outbound mail, so a human rewrite is
+ *    measurable. Without it the playbook library can never learn which templates
+ *    people actually send unedited.
+ * 2. `proforma_invoices` + `payment_milestones`, because a quote that nobody
+ *    turns into a PI and then chases for money is only half a deal.
+ * 3. `quotes.superseded_by` / `revision_reason`, so repricing preserves the
+ *    negotiation history instead of orphaning it.
+ */
+const MIGRATION_V2 = `
+ALTER TABLE outbound_messages ADD COLUMN original_subject TEXT;
+ALTER TABLE outbound_messages ADD COLUMN original_body TEXT;
+ALTER TABLE outbound_messages ADD COLUMN edited_by TEXT;
+ALTER TABLE outbound_messages ADD COLUMN edited_at TEXT;
+
+ALTER TABLE playbooks ADD COLUMN edit_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE quotes ADD COLUMN revision_reason TEXT;
+ALTER TABLE quotes ADD COLUMN superseded_by TEXT;
+
+-- 形式发票 / Proforma Invoice：成交后的第一份正式单据。
+-- 行项目直接复用 quote_items（PI 就是报价的正式化，另存一份会产生对账差异）。
+CREATE TABLE IF NOT EXISTS proforma_invoices (
+  id              TEXT PRIMARY KEY,
+  pi_no           TEXT NOT NULL UNIQUE,
+  quote_id        TEXT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+  inquiry_id      TEXT REFERENCES inquiries(id),
+  customer_id     TEXT NOT NULL REFERENCES customers(id),
+  currency        TEXT NOT NULL DEFAULT 'USD',
+  incoterm        TEXT NOT NULL DEFAULT 'FOB',
+  incoterm_place  TEXT NOT NULL DEFAULT 'Shenzhen',
+  subtotal        REAL NOT NULL DEFAULT 0,
+  freight         REAL NOT NULL DEFAULT 0,
+  insurance       REAL NOT NULL DEFAULT 0,
+  total           REAL NOT NULL DEFAULT 0,
+  deposit_pct     REAL NOT NULL DEFAULT 0.3,
+  deposit_amount  REAL NOT NULL DEFAULT 0,
+  balance_amount  REAL NOT NULL DEFAULT 0,
+  payment_terms   TEXT,
+  bank_info       TEXT,
+  shipment_date   TEXT,
+  valid_until     TEXT,
+  language        TEXT NOT NULL DEFAULT 'en',
+  status          TEXT NOT NULL DEFAULT 'issued',
+      -- issued|deposit_paid|paid|shipped|completed|cancelled
+  notes           TEXT,
+  pdf_path        TEXT,
+  issued_at       TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pi_quote ON proforma_invoices(quote_id);
+CREATE INDEX IF NOT EXISTS idx_pi_customer ON proforma_invoices(customer_id);
+CREATE INDEX IF NOT EXISTS idx_pi_status ON proforma_invoices(status, issued_at DESC);
+
+-- 回款节点：定金 / 尾款 / 尾款逾期。跟单智能体按这里扫逾期并起草催款。
+CREATE TABLE IF NOT EXISTS payment_milestones (
+  id            TEXT PRIMARY KEY,
+  pi_id         TEXT REFERENCES proforma_invoices(id) ON DELETE CASCADE,
+  quote_id      TEXT REFERENCES quotes(id),
+  customer_id   TEXT NOT NULL REFERENCES customers(id),
+  label         TEXT NOT NULL,
+  sequence_no   INTEGER NOT NULL DEFAULT 1,
+  amount        REAL NOT NULL DEFAULT 0,
+  currency      TEXT NOT NULL DEFAULT 'USD',
+  due_at        TEXT,
+  status        TEXT NOT NULL DEFAULT 'pending',
+      -- pending|invoiced|paid|overdue|waived
+  paid_amount   REAL NOT NULL DEFAULT 0,
+  paid_at       TEXT,
+  method        TEXT,
+  note          TEXT,
+  reminded_at   TEXT,
+  remind_count  INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_milestones_due ON payment_milestones(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_milestones_pi ON payment_milestones(pi_id);
+CREATE INDEX IF NOT EXISTS idx_milestones_customer ON payment_milestones(customer_id);
+`;
+
 /** Applied in order; each entry is a forward-only migration. */
 export const MIGRATIONS: Array<{ version: number; name: string; sql: string }> = [
   { version: 1, name: 'initial_schema', sql: SCHEMA_SQL },
+  { version: 2, name: 'proforma_invoices_payments_and_edit_tracking', sql: MIGRATION_V2 },
 ];

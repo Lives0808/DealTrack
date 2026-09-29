@@ -1,4 +1,5 @@
 import { getDb, type Row } from '../db.js';
+import { EVENTS, emit } from '../events.js';
 import { addDays, nowIso, parseJson, uid } from '../util.js';
 import { getCustomer, type Customer } from './sales.js';
 
@@ -61,6 +62,10 @@ export interface Quote {
   notes: string | null;
   internalNotes: string | null;
   pdfPath: string | null;
+  /** Why this version exists, when it is a revision. */
+  revisionReason: string | null;
+  /** Id of the newer version that replaced this one. */
+  supersededBy: string | null;
   createdAt: string;
   updatedAt: string;
   items?: QuoteItem[];
@@ -103,6 +108,8 @@ export function mapQuote(row: Row): Quote {
     notes: (row.notes as string | null) ?? null,
     internalNotes: (row.internal_notes as string | null) ?? null,
     pdfPath: (row.pdf_path as string | null) ?? null,
+    revisionReason: (row.revision_reason as string | null) ?? null,
+    supersededBy: (row.superseded_by as string | null) ?? null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -272,6 +279,20 @@ export function getQuote(id: string, withItems = true): Quote | null {
   return quote;
 }
 
+/** Quotes whose validity has lapsed but whose status never moved on. */
+export function lapsedQuotes(graceDays = 0): Quote[] {
+  return getDb()
+    .all<Row>(
+      `SELECT * FROM quotes
+        WHERE status IN ('sent', 'pending_approval', 'draft')
+          AND valid_until IS NOT NULL
+          AND valid_until <= ?
+        ORDER BY valid_until ASC`,
+      new Date(Date.now() - graceDays * 86_400_000).toISOString(),
+    )
+    .map(mapQuote);
+}
+
 export function listQuoteItems(quoteId: string): QuoteItem[] {
   return getDb()
     .all<Row>('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY line_no', quoteId)
@@ -354,6 +375,8 @@ export function updateQuote(id: string, patch: Record<string, unknown>): boolean
     'lead_time_days',
     'language',
     'version',
+    'revision_reason',
+    'superseded_by',
   ]);
   const dbPatch: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
@@ -466,6 +489,32 @@ export function recordOutcome(input: {
       status: input.result === 'won' ? 'accepted' : input.result === 'lost' ? 'rejected' : quote.status,
     });
   }
+
+  // Emit from here, not from the callers. `recordOutcome` is invoked by the API,
+  // by the sales agent and by the expiry sweep; if each had to remember to emit,
+  // the proforma invoice would only appear on some of those paths.
+  if (quote && (input.result === 'won' || input.result === 'lost')) {
+    emit({
+      type: input.result === 'won' ? EVENTS.QUOTE_ACCEPTED : EVENTS.QUOTE_REJECTED,
+      actor: input.decidedBy ?? 'system',
+      entityType: 'quote',
+      entityId: quote.id,
+      subject:
+        input.result === 'won'
+          ? `成交：${quote.quoteNo}（${quote.currency} ${quote.total.toFixed(2)}）`
+          : `丢单：${quote.quoteNo}（${input.reasonCode ?? 'other'}）`,
+      payload: {
+        quoteId: quote.id,
+        inquiryId: quote.inquiryId,
+        customerId: quote.customerId,
+        total: quote.total,
+        currency: quote.currency,
+        reasonCode: input.reasonCode ?? null,
+        note: input.reasonNote ?? null,
+      },
+    });
+  }
+
   return mapOutcome(db.get<Row>('SELECT * FROM quote_outcomes WHERE id = ?', id)!);
 }
 

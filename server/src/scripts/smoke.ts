@@ -19,14 +19,30 @@ import path from 'node:path';
 import { config } from '../core/config.js';
 import { createDb, getDb, setDb } from '../core/db.js';
 import { seedDatabase, SAMPLE_INQUIRIES, summarize } from './seed.js';
+import { addDays } from '../core/util.js';
+import { SETTING_KEYS, getAutomation, setSetting } from '../core/settings.js';
 import { ingestInbound } from '../core/ingest.js';
 import { registerAgents, runTask, wireRoutes } from '../agents/orchestrator.js';
 import { getQueue } from '../core/queue.js';
 import { getCustomer, listInquiries, getInquiry } from '../core/repos/sales.js';
-import { listQuotes, getQuote, recordOutcome } from '../core/repos/quoting.js';
+import { listOutcomes, listQuotes, getQuote, recordOutcome } from '../core/repos/quoting.js';
 import { listFollowups, listMessages, listPlaybooks } from '../core/repos/engagement.js';
+import { listAlerts } from '../core/repos/engagement.js';
 import { generateDeclaration } from '../docgen/declaration.js';
 import { generateQuotePdf } from '../docgen/quote.js';
+import { generatePiPdf } from '../docgen/proforma.js';
+import {
+  dueMilestones,
+  getPiByQuote,
+  listMilestones,
+  markMilestonePaid,
+  paymentSummary,
+  quoteRevisionChain,
+  refreshOverdueMilestones,
+  reviseQuote,
+} from '../core/repos/billing.js';
+import { isReplySubject, sameConversation } from '../core/ingest.js';
+import { recordHumanEdit } from '../core/repos/engagement.js';
 import { detectLanguage } from '../core/i18n.js';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -278,12 +294,200 @@ async function main(): Promise<void> {
   const eventCount = getDb().count('SELECT COUNT(*) FROM events');
   const eventTypes = getDb().all<Record<string, unknown>>('SELECT DISTINCT type FROM events');
   check('事件日志非空', eventCount > 20, `${eventCount} 条事件 / ${eventTypes.length} 种类型`);
-  check('任务全部落定', getDb().count("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('queued','running')") === 0, '无悬挂任务');
   check('无死信任务', getDb().count("SELECT COUNT(*) FROM agent_tasks WHERE status = 'dead'") === 0);
   const runs = getDb().count('SELECT COUNT(*) FROM agent_runs');
   check('智能体运行已记录', runs > 0, `${runs} 次运行`);
   const agentsUsed = new Set(getDb().all<Record<string, unknown>>('SELECT DISTINCT agent FROM agent_runs').map((r) => String(r.agent)));
   check('三个智能体均参与', agentsUsed.size >= 2, [...agentsUsed].join('/'));
+
+  console.log('\n【13】成交链路：形式发票 + 回款节点');
+  // `quote.accepted` fans out to both the proforma and the customs declaration,
+  // so the PI should exist without anyone asking for it.
+  await drainQueue();
+  const pi = getPiByQuote(winQuote.id);
+  check('成交后自动生成形式发票', Boolean(pi), pi ? `${pi.piNo} 总额 ${pi.currency} ${pi.total.toFixed(2)}` : '未生成');
+  check(
+    '定金/尾款按付款条款拆分',
+    Boolean(pi) && pi!.depositAmount > 0 && pi!.balanceAmount > 0 && Math.abs(pi!.depositAmount + pi!.balanceAmount - pi!.total) < 0.02,
+    pi ? `定金 ${pi.depositAmount.toFixed(2)} (${(pi.depositPct * 100).toFixed(0)}%) + 尾款 ${pi.balanceAmount.toFixed(2)}` : '',
+  );
+  check('回款节点已排定', (pi?.milestones?.length ?? 0) >= 2, (pi?.milestones ?? []).map((m) => m.label).join('/'));
+  const piPath = await generatePiPdf(winQuote.id);
+  check('形式发票 PDF 已生成', Boolean(piPath), piPath ? path.basename(piPath) : '失败');
+
+  const deposit = (pi?.milestones ?? []).find((m) => m.label === 'deposit');
+  if (deposit) {
+    const paid = markMilestonePaid({ id: deposit.id, method: 'smoke-test', note: '测试收款' });
+    check('登记收款后节点完结', paid?.status === 'paid', paid?.status ?? '');
+    check('PI 状态推进', getPiByQuote(winQuote.id)?.status === 'deposit_paid', getPiByQuote(winQuote.id)?.status ?? '');
+  }
+
+  refreshOverdueMilestones();
+  const cashflow = paymentSummary(addDays(-365));
+  check(
+    '回款汇总可用',
+    cashflow.outstanding >= 0 && cashflow.collected > 0,
+    `未收 ${cashflow.outstanding.toFixed(0)} / 已收 ${cashflow.collected.toFixed(0)} / 逾期 ${cashflow.overdueCount} 笔`,
+  );
+
+  console.log('\n【14】报价改版（保留谈判历史）');
+  const revised = reviseQuote({
+    quoteId: winQuote.id,
+    reason: '客户砍价，下调毛利 3 个点',
+    createdBy: 'smoke',
+    discountPct: 0.03,
+  });
+  check('改版生成新版本', Boolean(revised) && revised!.version >= 2, revised ? `${revised.quoteNo} v${revised.version}` : '失败');
+  check('新版本关联父报价', revised?.parentQuoteId === winQuote.id, revised?.parentQuoteId ?? '');
+  check('新版本标记待审批', revised?.status === 'pending_approval', revised?.status ?? '');
+  check('原报价被标记 superseded', getQuote(winQuote.id, false)?.status === 'superseded', getQuote(winQuote.id, false)?.status ?? '');
+  const chain = quoteRevisionChain(revised!.id);
+  check('改版链完整', chain.length >= 2, chain.map((entry) => entry.quoteNo).join(' → '));
+  check(
+    '改版降低总价',
+    Boolean(revised) && revised!.total < winQuote.total,
+    revised ? `${winQuote.total.toFixed(0)} → ${revised.total.toFixed(0)}` : '',
+  );
+
+  console.log('\n【15】人工改稿留痕（话术库的学习信号）');
+  const sentMessage = listMessages({ status: 'sent', limit: 5 }).find((message) => message.quoteId === winQuote.id)
+    ?? listMessages({ status: 'sent', limit: 5 })[0];
+  if (sentMessage) {
+    const edited = recordHumanEdit(sentMessage.id, {
+      body: `${sentMessage.body}\n\nP.S. 这是人工补充的一句话。`,
+      editor: 'user:sales',
+    });
+    check('人工改动被记录', edited.changed, edited.changed ? '已记录原稿' : '未记录');
+    check(
+      '保留原稿用于对比',
+      Boolean(edited.revertToOriginal?.body),
+      edited.revertToOriginal?.body ? `${edited.revertToOriginal.body.length} 字符原稿` : '',
+    );
+    const again = recordHumanEdit(sentMessage.id, { body: '再改一次', editor: 'user:sales' });
+    const message = listMessages({ limit: 200 }).find((entry) => entry.id === sentMessage.id);
+    check('原稿只捕获一次（不被后续编辑覆盖）', again.changed && message?.originalBody === edited.revertToOriginal?.body, '');
+  } else {
+    check('人工改动被记录', false, '没有已发送的消息可测试');
+  }
+
+  console.log('\n【16】回复识别收紧（不把新项目并进旧对话）');
+  check('Re: 前缀识别为回复', isReplySubject('Re: Quotation QT-202609-0001'), '');
+  check('德文 AW: 识别为回复', isReplySubject('AW: Anfrage 3000 Stück'), '');
+  check('中文「回复」识别为回复', isReplySubject('回复：报价单 QT-202609-0001'), '');
+  check('全新主题不算回复', !isReplySubject('Neue Anfrage: Solarpanels 450W'), '');
+  check(
+    '去掉 Re: 前缀后同一对话',
+    sameConversation('Re: Quotation QT-202609-0001', 'Quotation QT-202609-0001'),
+    '',
+  );
+  check('不同主题不同对话', !sameConversation('Quotation QT-202609-0001', 'Neue Anfrage: Solarpanels'), '');
+
+  // A brand-new subject from a known customer must create a NEW inquiry.
+  const beforeCount = listInquiries({ limit: 200 }).length;
+  const newBusiness = ingestInbound({
+    channel: 'email',
+    fromEmail: after.fromEmail,
+    fromName: after.fromName,
+    subject: 'Neue Anfrage: 2000 Stück Campingstühle',
+    body: 'Wir möchten 2000 Stück Campingstühle XL anfragen, CIF Hamburg, Zielpreis USD 25.',
+    messageId: `${inboundMessageId}-new-business`,
+  });
+  check(
+    '老客户的新项目另建询盘',
+    !newBusiness.isReply && listInquiries({ limit: 200 }).length === beforeCount + 1,
+    newBusiness.isReply ? '被误判为回复并进了旧询盘' : `新建 ${newBusiness.inquiry.code}`,
+  );
+
+  console.log('\n【17】部分匹配必须显式暴露（不能静默丢行）');
+  const partial = ingestInbound({
+    channel: 'email',
+    fromEmail: 'partial@example.com',
+    fromName: 'Partial Buyer',
+    subject: 'RFQ two items',
+    body: 'Please quote:\n- 1,000 pcs 50W Portable LED Work Light, IP65\n- 250 rolls Organic Cotton Canvas 12oz, natural undyed\nCIF Hamburg',
+    messageId: `${inboundMessageId}-partial`,
+  });
+  await drainQueue();
+  const partialInquiry = getInquiry(partial.inquiry.id)!;
+  const partialQuote = listQuotes({ inquiryId: partial.inquiry.id, limit: 5 })[0];
+  const partialAlerts = listAlerts({ openOnly: true, limit: 50 }).filter(
+    (alert) => alert.type === 'quote.partial_match' && alert.entityId === partialQuote?.id,
+  );
+  const partialMessages = listMessages({ inquiryId: partial.inquiry.id, limit: 5 });
+  check('部分匹配的询盘仍能出报价', Boolean(partialQuote), partialQuote ? `${partialQuote.quoteNo}（1 行）` : '未生成');
+  check('未匹配行触发了预警', partialAlerts.length > 0, partialAlerts[0]?.title ?? '无预警');
+  check(
+    '报价单内部备注记录了缺失行',
+    Boolean(partialQuote?.internalNotes?.includes('未能匹配产品库')),
+    partialQuote?.internalNotes?.slice(0, 72) ?? '',
+  );
+  check(
+    '未匹配行被写进给客户的回复',
+    Boolean(partialMessages.some((message) => message.body.includes('Cotton Canvas'))),
+    '回复中列出了待确认行',
+  );
+
+  // The guard that actually matters: even with auto-send ON, a quote missing a
+  // line item must stop for a human. Losing an item is worse than losing a minute.
+  setSetting(SETTING_KEYS.AUTOMATION, { ...getAutomation(), autoSend: true });
+  const guard = ingestInbound({
+    channel: 'email',
+    fromEmail: 'autosend@example.com',
+    fromName: 'AutoSend Buyer',
+    subject: 'RFQ mixed',
+    body: 'Please quote:\n- 800 pcs 20000mAh Power Bank with PD 65W\n- 120 rolls Organic Cotton Canvas 12oz\nCIF Jebel Ali',
+    messageId: `${inboundMessageId}-autosend-guard`,
+  });
+  await drainQueue();
+  const guardQuote = listQuotes({ inquiryId: guard.inquiry.id, limit: 3 })[0];
+  const guardMessages = listMessages({ inquiryId: guard.inquiry.id, limit: 5 });
+  check(
+    '开启自动发送时，缺行的报价仍被拦下',
+    Boolean(guardQuote) && guardQuote!.status !== 'sent',
+    guardQuote ? `${guardQuote.quoteNo} 状态 ${guardQuote.status}` : '未生成报价',
+  );
+  check(
+    '开启自动发送时，缺行的回复草稿仍不发出',
+    guardMessages.every((message) => message.status !== 'sent'),
+    guardMessages.map((message) => message.status).join('/') || '无草稿',
+  );
+  setSetting(SETTING_KEYS.AUTOMATION, { ...getAutomation(), autoSend: false });
+
+  console.log('\n【18】报价过期与失联自动结单');
+  const stale = listQuotes({ status: 'sent,pending_approval,draft', limit: 20 })[0];
+  if (stale) {
+    // Backdate validity so the sweep treats it as long lapsed.
+    getDb().run(
+      'UPDATE quotes SET valid_until = ?, status = ? WHERE id = ?',
+      addDays(-30),
+      'sent',
+      stale.id,
+    );
+    getQueue().enqueue({ agent: 'followup', taskType: 'expire_quotes', payload: {}, priority: 10 });
+    await drainQueue();
+    const expiredQuote = getQuote(stale.id, false);
+    check('过期报价状态推进为 expired', expiredQuote?.status === 'expired', expiredQuote?.status ?? '');
+    const outcome = listOutcomes({ quoteId: stale.id, limit: 5 })[0];
+    check('超期后自动登记 no_response', outcome?.result === 'no_response', outcome?.result ?? '未登记');
+  } else {
+    check('过期报价状态推进为 expired', false, '没有可测试的报价');
+  }
+
+  console.log('\n【19】收尾：队列必须干净');
+  // Recording a win fans out to the proforma invoice and the customs
+  // declaration, so the pipeline is genuinely still working during the earlier
+  // sections. Only claim "nothing stranded" once everything has drained.
+  await drainQueue();
+  const stranded = getDb().count("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('queued','running')");
+  check('任务全部落定', stranded === 0, stranded === 0 ? '无悬挂任务' : `仍有 ${stranded} 个任务未落定`);
+  const deadLetters = getDb().all<Record<string, unknown>>(
+    "SELECT task_type, last_error FROM agent_tasks WHERE status = 'dead' LIMIT 5",
+  );
+  check(
+    '无死信任务',
+    deadLetters.length === 0,
+    deadLetters.map((row) => `${row.task_type}: ${String(row.last_error).slice(0, 60)}`).join(' | '),
+  );
 
   // ---- Report -------------------------------------------------------------
   const passed = results.filter((r) => r.ok).length;

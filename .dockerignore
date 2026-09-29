@@ -1,0 +1,21 @@
+# 构建产物
+node_modules/
+dist/
+build/
+*.log
+
+# 运行时数据 —— 绝对不能进镜像层
+data/
+storage/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# 密钥
+.master.key
+*.key
+*.pem
+.env
+.env.*
+!env.example

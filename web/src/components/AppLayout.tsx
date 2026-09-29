@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Badge, Button, Dropdown, Empty, Layout, Menu, Space, Tag, Tooltip, Typography, message as toast } from 'antd';
 import {
   AppstoreOutlined,
+  BankOutlined,
   BookOutlined,
   BulbOutlined,
   DashboardOutlined,
@@ -27,6 +28,7 @@ const NAV = [
   { key: '/inbox', icon: <InboxOutlined />, label: '询盘箱' },
   { key: '/quotes', icon: <DollarOutlined />, label: '报价单' },
   { key: '/followups', icon: <ScheduleOutlined />, label: '跟进看板' },
+  { key: '/payments', icon: <BankOutlined />, label: '回款看板' },
   { key: '/customers', icon: <UserOutlined />, label: '客户库' },
   { key: '/products', icon: <AppstoreOutlined />, label: '产品库' },
   { key: '/playbooks', icon: <BookOutlined />, label: '话术库' },
