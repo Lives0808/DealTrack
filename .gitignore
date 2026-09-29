@@ -28,6 +28,7 @@ storage/
 
 # Android
 android/.gradle/
+android/.kotlin/
 android/local.properties
 android/app/release/
 android/build/
